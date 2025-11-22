@@ -2,6 +2,7 @@
 Main GUI application (tkinter) for crawling B站并生成崩坏3 UP 主排行榜。
 """
 import threading
+import concurrent.futures
 import requests
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
@@ -106,6 +107,9 @@ class App:
         ttk.Label(settings_frame, text="LLM 权重 (0-1):").grid(row=0, column=4, sticky=tk.W, padx=(10,0))
         self.llm_weight = tk.DoubleVar(value=0.4)
         ttk.Spinbox(settings_frame, from_=0.0, to=1.0, increment=0.1, textvariable=self.llm_weight, width=6).grid(row=0, column=5, sticky=tk.W)
+        ttk.Label(settings_frame, text="LLM 并发数:").grid(row=1, column=4, sticky=tk.W, padx=(10,0))
+        self.llm_threads = tk.IntVar(value=4)
+        ttk.Spinbox(settings_frame, from_=1, to=10, textvariable=self.llm_threads, width=6).grid(row=1, column=5, sticky=tk.W)
 
         # --- Actions frame ---
         actions = ttk.Frame(self.main)
@@ -179,6 +183,7 @@ class App:
             "use_proxy": bool(self.use_proxy.get()),
             "use_proxypool": bool(self.use_proxypool.get()),
             "llm_weight": float(self.llm_weight.get()),
+            "llm_threads": int(self.llm_threads.get()),
         }
         try:
             with open(self.config_path(), "w", encoding="utf-8") as f:
@@ -207,6 +212,10 @@ class App:
                 self.llm_weight.set(float(cfg.get("llm_weight", 0.4)))
             except Exception:
                 self.llm_weight.set(0.4)
+            try:
+                self.llm_threads.set(int(cfg.get("llm_threads", 4)))
+            except Exception:
+                self.llm_threads.set(4)
             self.log("已加载配置")
         except Exception as e:
             self.log(f"加载配置失败: {e}")
@@ -510,25 +519,64 @@ class App:
                     for r in lst:
                         r['final_score'] = lst_norm.get(r['mid'], 0.0)
                     return
-                for r in lst[:50]:
+
+                # perform LLM analysis in parallel for top N (configurable via self.llm_threads)
+                top_n = min(50, len(lst))
+                tops = lst[:top_n]
+
+                def _call_llm_safe(uinfo, rref):
                     try:
-                        info = {"name": r['name'], 'mid': r['mid'], 'videos': r.get('total_videos'), 'views': r.get('views'), 'likes': r.get('likes'), 'top_videos': r.get('videos_list')[:3]}
-                        out = llm.analyze_uploader(info, top_videos=r.get('videos_list')[:3])
-                        llm_score = out.get('score') if isinstance(out, dict) else None
-                        try:
-                            llm_score = float(llm_score)
-                        except Exception:
-                            llm_score = None
-                        if llm_score is None:
-                            llm_score = 5.0
-                        llm_score = max(1.0, min(10.0, llm_score))
-                        r['llm_score'] = llm_score
-                        r['llm_summary'] = out.get('summary', '') if isinstance(out, dict) else str(out)
+                        return llm.analyze_uploader(uinfo, top_videos=rref.get('videos_list')[:3])
                     except Exception as e:
-                        r['llm_score'] = 5.0
-                        r['llm_summary'] = f"LLM error: {e}"
-                        self.log(f"LLM 分析 {r.get('name')} 出错: {e}")
-                        self.log(traceback.format_exc())
+                        try:
+                            self.log(f"LLM 分析 {rref.get('name')} 出错: {e}")
+                            self.log(traceback.format_exc())
+                        except Exception:
+                            pass
+                        return {"score": None, "summary": f"LLM error: {e}"}
+
+                max_workers = 4
+                try:
+                    max_workers = max(1, min(10, int(self.llm_threads.get())))
+                except Exception:
+                    max_workers = 4
+
+                future_to_mid = {}
+                results_map = {}
+                with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as ex:
+                    for r in tops:
+                        info = {"name": r['name'], 'mid': r['mid'], 'videos': r.get('total_videos'), 'views': r.get('views'), 'likes': r.get('likes'), 'top_videos': r.get('videos_list')[:3]}
+                        fut = ex.submit(_call_llm_safe, info, r)
+                        future_to_mid[fut] = r['mid']
+                    for fut in concurrent.futures.as_completed(future_to_mid):
+                        mid = future_to_mid[fut]
+                        try:
+                            out = fut.result()
+                        except Exception as e:
+                            out = {"score": None, "summary": f"LLM error: {e}"}
+                        results_map[mid] = out
+
+                # apply results to corresponding entries
+                for r in tops:
+                    out = results_map.get(r['mid']) or {"score": None, "summary": ""}
+                    llm_score = out.get('score') if isinstance(out, dict) else None
+                    try:
+                        llm_score = float(llm_score)
+                    except Exception:
+                        llm_score = None
+                    if llm_score is None:
+                        llm_score = 5.0
+                    llm_score = max(1.0, min(10.0, llm_score))
+                    r['llm_score'] = llm_score
+                    r['llm_summary'] = out.get('summary', '') if isinstance(out, dict) else str(out)
+                    # write LLM output to app log (truncate to avoid flooding)
+                    try:
+                        summary_text = r['llm_summary'] or ''
+                        short = (summary_text[:400] + '...') if len(summary_text) > 400 else summary_text
+                        self.log(f"LLM 分析 - {r.get('name')} ({r.get('mid')}): score={llm_score}, summary={short}")
+                    except Exception:
+                        pass
+
                 for r in lst:
                     base = lst_norm.get(r['mid'], 0.0)
                     llm_s = r.get('llm_score')
