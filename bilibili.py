@@ -6,6 +6,7 @@ import requests
 from typing import List, Dict, Any
 import time
 import random
+import concurrent.futures
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
@@ -222,22 +223,52 @@ def get_video_detail(bvid: str) -> Dict[str, Any]:
 
 
 def collect_by_keyword(keyword: str, pages: int = 2) -> List[Dict[str, Any]]:
+    """Collect search results for a keyword and fetch video details in parallel.
+
+    To avoid creating too many concurrent requests (which may trigger anti-scraping),
+    this function uses a ThreadPoolExecutor with a limited number of workers and
+    relies on the underlying `_safe_get` jitter/backoff as well.
+
+    max_workers: cap concurrent detail fetches (default 5).
+    """
     out = []
+    # tunable worker cap — keep moderate to reduce risk of bans
+    max_workers = 5
     for p in range(1, pages + 1):
         items = []
         try:
             items = search_videos(keyword, page=p)
         except Exception:
             items = []
+
+        if not items:
+            continue
+
+        # map bvid -> original item so we can merge detail responses
+        bvid_map = {}
+        bvids = []
         for it in items:
-            # some search results contain 'bvid' while others may use 'bvid' in nested fields
             bvid = it.get("bvid") or it.get("bvid")
             if not bvid:
                 continue
-            try:
-                detail = get_video_detail(bvid)
-            except Exception:
-                detail = {}
+            bvids.append(bvid)
+            bvid_map[bvid] = it
+
+        # fetch details concurrently but limit parallelism
+        details_map: Dict[str, Dict[str, Any]] = {}
+        if bvids:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=min(max_workers, len(bvids))) as ex:
+                future_to_bvid = {ex.submit(get_video_detail, b): b for b in bvids}
+                for fut in concurrent.futures.as_completed(future_to_bvid):
+                    b = future_to_bvid[fut]
+                    try:
+                        details_map[b] = fut.result()
+                    except Exception:
+                        details_map[b] = {}
+
+        for bvid in bvids:
+            it = bvid_map.get(bvid, {})
+            detail = details_map.get(bvid, {}) or {}
             entry = {
                 "keyword": keyword,
                 "bvid": bvid,
