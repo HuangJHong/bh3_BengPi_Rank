@@ -35,152 +35,114 @@ class App:
     def __init__(self, root):
         self.root = root
         root.title("B站崩批统计排行榜")
-        root.geometry("1200x800")
-        root.minsize(1000, 700)
-        
-        # 配置颜色主题
-        root.configure(bg='#f0f0f0')
-        
+        root.geometry("1000x720")
+
         style = ttk.Style()
         try:
             style.theme_use('clam')
         except Exception:
             pass
-        
-        # 自定义样式
-        style.configure('Title.TLabel', font=('Microsoft YaHei UI', 12, 'bold'), background='#f0f0f0')
-        style.configure('Header.TLabel', font=('Microsoft YaHei UI', 9, 'bold'), background='#f0f0f0')
-        # 配置 LabelFrame 样式（使用默认的 TLabelFrame 并配置字体）
-        style.configure('TLabelFrame', font=('Microsoft YaHei UI', 9, 'bold'))
-        # 配置 Checkbutton 字体
-        style.configure('TCheckbutton', font=('Microsoft YaHei UI', 9))
-        # 配置 Entry、Combobox、Spinbox 字体
-        style.configure('TEntry', font=('Microsoft YaHei UI', 9))
-        style.configure('TCombobox', font=('Microsoft YaHei UI', 9))
-        style.configure('TSpinbox', font=('Microsoft YaHei UI', 9))
-        style.configure('Action.TButton', font=('Microsoft YaHei UI', 9), padding=6)
-        style.configure('Primary.TButton', font=('Microsoft YaHei UI', 9, 'bold'), padding=8)
-        style.map('Primary.TButton', 
-                  background=[('active', '#4CAF50'), ('!active', '#45a049')],
-                  foreground=[('active', 'white'), ('!active', 'white')])
-        # 表格样式
-        style.configure("Treeview", font=('Microsoft YaHei UI', 9), rowheight=25, fieldbackground='white')
-        style.configure("Treeview.Heading", font=('Microsoft YaHei UI', 9, 'bold'), background='#e0e0e0', relief='flat')
-        style.map("Treeview", 
-                  background=[('selected', '#4CAF50')],
-                  foreground=[('selected', 'white')])
-        
-        # 主容器
-        self.main = ttk.Frame(root, padding=12)
+
+        # main container
+        self.main = ttk.Frame(root, padding=8)
         self.main.pack(fill=tk.BOTH, expand=True)
 
         # --- Filter frame (keywords, date, pages, leaderboard) ---
-        filter_frame = ttk.LabelFrame(self.main, text="📊 筛选条件", padding=12)
-        filter_frame.pack(fill=tk.X, padx=6, pady=6)
+        filter_frame = ttk.LabelFrame(self.main, text="筛选条件", padding=8)
+        filter_frame.pack(fill=tk.X, padx=4, pady=4)
 
-        ttk.Label(filter_frame, text="关键词（逗号分隔）:", style='Header.TLabel').grid(row=0, column=0, sticky=tk.W, pady=4)
+        ttk.Label(filter_frame, text="关键词（逗号分隔）:").grid(row=0, column=0, sticky=tk.W)
         self.kv = tk.StringVar(value=",".join(DEFAULT_KEYWORDS))
-        entry_keywords = ttk.Entry(filter_frame, textvariable=self.kv, width=70)
-        entry_keywords.grid(row=0, column=1, columnspan=3, sticky=tk.W, padx=8, pady=4)
+        ttk.Entry(filter_frame, textvariable=self.kv, width=70).grid(row=0, column=1, columnspan=3, sticky=tk.W, padx=6, pady=2)
 
-        ttk.Label(filter_frame, text="开始日期:", style='Header.TLabel').grid(row=1, column=0, sticky=tk.W, pady=4)
+        ttk.Label(filter_frame, text="开始日期:").grid(row=1, column=0, sticky=tk.W)
         self.start = tk.StringVar(value=(datetime.now().strftime("%Y-01-01")))
-        ttk.Entry(filter_frame, textvariable=self.start, width=14).grid(row=1, column=1, sticky=tk.W, padx=8, pady=4)
+        ttk.Entry(filter_frame, textvariable=self.start, width=14).grid(row=1, column=1, sticky=tk.W)
 
-        ttk.Label(filter_frame, text="结束日期:", style='Header.TLabel').grid(row=1, column=2, sticky=tk.W, pady=4)
+        ttk.Label(filter_frame, text="结束日期:").grid(row=1, column=2, sticky=tk.W)
         self.end = tk.StringVar(value=datetime.now().strftime("%Y-%m-%d"))
-        ttk.Entry(filter_frame, textvariable=self.end, width=14).grid(row=1, column=3, sticky=tk.W, padx=8, pady=4)
+        ttk.Entry(filter_frame, textvariable=self.end, width=14).grid(row=1, column=3, sticky=tk.W)
 
-        ttk.Label(filter_frame, text="Pages/关键词:", style='Header.TLabel').grid(row=1, column=4, sticky=tk.W, padx=(16,0), pady=4)
+        ttk.Label(filter_frame, text="Pages/关键词:").grid(row=1, column=4, sticky=tk.W, padx=(10,0))
         self.pages = tk.IntVar(value=2)
-        ttk.Spinbox(filter_frame, from_=1, to=10, textvariable=self.pages, width=6).grid(row=1, column=5, sticky=tk.W, padx=4, pady=4)
+        ttk.Spinbox(filter_frame, from_=1, to=10, textvariable=self.pages, width=6).grid(row=1, column=5, sticky=tk.W)
 
-        ttk.Label(filter_frame, text="显示榜单:", style='Header.TLabel').grid(row=0, column=4, sticky=tk.W, padx=(16,0), pady=4)
+        ttk.Label(filter_frame, text="显示榜单:").grid(row=0, column=4, sticky=tk.W, padx=(10,0))
         self.leaderboard_var = tk.StringVar(value="总榜")
         self.leaderboard_cb = ttk.Combobox(filter_frame, values=["总榜", "深渊榜", "战场榜"], textvariable=self.leaderboard_var, width=12, state='readonly')
-        self.leaderboard_cb.grid(row=0, column=5, sticky=tk.W, padx=4, pady=4)
+        self.leaderboard_cb.grid(row=0, column=5, sticky=tk.W)
         self.leaderboard_cb.bind("<<ComboboxSelected>>", lambda e: self.on_leaderboard_change())
 
         # --- Settings frame (LLM, cookie, proxy) ---
-        settings_frame = ttk.LabelFrame(self.main, text="⚙️ 设置", padding=12)
-        settings_frame.pack(fill=tk.X, padx=6, pady=6)
+        settings_frame = ttk.LabelFrame(self.main, text="设置", padding=8)
+        settings_frame.pack(fill=tk.X, padx=4, pady=4)
 
-        ttk.Label(settings_frame, text="LLM Provider:", style='Header.TLabel').grid(row=0, column=0, sticky=tk.W, pady=4)
+        ttk.Label(settings_frame, text="LLM Provider:").grid(row=0, column=0, sticky=tk.W)
         self.provider = tk.StringVar(value="openai")
-        ttk.Combobox(settings_frame, values=["openai", "ollama", "none"], textvariable=self.provider, width=12, state='readonly').grid(row=0, column=1, sticky=tk.W, padx=4, pady=4)
+        ttk.Combobox(settings_frame, values=["openai", "ollama", "none"], textvariable=self.provider, width=12, state='readonly').grid(row=0, column=1, sticky=tk.W)
 
         # enable/disable LLM usage switch
         self.use_llm = tk.BooleanVar(value=True)
-        ttk.Checkbutton(settings_frame, text="启用 LLM", variable=self.use_llm).grid(row=0, column=6, sticky=tk.W, padx=(12,0), pady=4)
+        ttk.Checkbutton(settings_frame, text="启用 LLM", variable=self.use_llm).grid(row=0, column=6, sticky=tk.W, padx=(8,0))
 
-        ttk.Label(settings_frame, text="LLM API Key:", style='Header.TLabel').grid(row=0, column=2, sticky=tk.W, padx=(12,0), pady=4)
+        ttk.Label(settings_frame, text="LLM API Key:").grid(row=0, column=2, sticky=tk.W, padx=(10,0))
         self.api_key = tk.StringVar(value="")
-        ttk.Entry(settings_frame, textvariable=self.api_key, width=34, show='*').grid(row=0, column=3, sticky=tk.W, padx=4, pady=4)
+        ttk.Entry(settings_frame, textvariable=self.api_key, width=34, show='*').grid(row=0, column=3, sticky=tk.W)
 
-        ttk.Label(settings_frame, text="LLM API URL:", style='Header.TLabel').grid(row=1, column=0, sticky=tk.W, pady=4)
+        ttk.Label(settings_frame, text="LLM API URL:").grid(row=1, column=0, sticky=tk.W)
         self.api_url = tk.StringVar(value="")
-        ttk.Entry(settings_frame, textvariable=self.api_url, width=50).grid(row=1, column=1, columnspan=3, sticky=tk.W, padx=4, pady=4)
+        ttk.Entry(settings_frame, textvariable=self.api_url, width=50).grid(row=1, column=1, columnspan=3, sticky=tk.W, pady=2)
 
-        ttk.Label(settings_frame, text="LLM Model:", style='Header.TLabel').grid(row=2, column=4, sticky=tk.W, padx=(12,0), pady=4)
+        ttk.Label(settings_frame, text="LLM Model:").grid(row=2, column=4, sticky=tk.W, padx=(10,0))
         self.llm_model = tk.StringVar(value="gpt-3.5-turbo")
-        ttk.Entry(settings_frame, textvariable=self.llm_model, width=20).grid(row=2, column=5, sticky=tk.W, padx=4, pady=4)
+        ttk.Entry(settings_frame, textvariable=self.llm_model, width=20).grid(row=2, column=5, sticky=tk.W)
 
-        ttk.Label(settings_frame, text="B站 Cookie:", style='Header.TLabel').grid(row=2, column=0, sticky=tk.W, pady=4)
+        ttk.Label(settings_frame, text="B站 Cookie:").grid(row=2, column=0, sticky=tk.W)
         self.bil_cookie = tk.StringVar(value="")
-        # mask cookie display for privacy
-        ttk.Entry(settings_frame, textvariable=self.bil_cookie, width=70, show='*').grid(row=2, column=1, columnspan=3, sticky=tk.W, padx=4, pady=4)
+        ttk.Entry(settings_frame, textvariable=self.bil_cookie, width=70).grid(row=2, column=1, columnspan=3, sticky=tk.W)
 
-        ttk.Label(settings_frame, text="代理池 (逗号分隔):", style='Header.TLabel').grid(row=3, column=0, sticky=tk.W, pady=4)
+        ttk.Label(settings_frame, text="代理池 (逗号分隔):").grid(row=3, column=0, sticky=tk.W)
         self.proxy_list = tk.StringVar(value="")
-        ttk.Entry(settings_frame, textvariable=self.proxy_list, width=70).grid(row=3, column=1, columnspan=3, sticky=tk.W, padx=4, pady=4)
+        ttk.Entry(settings_frame, textvariable=self.proxy_list, width=70).grid(row=3, column=1, columnspan=3, sticky=tk.W)
         self.use_proxy = tk.BooleanVar(value=False)
-        ttk.Checkbutton(settings_frame, text="启用代理池", variable=self.use_proxy).grid(row=3, column=4, sticky=tk.W, padx=8, pady=4)
+        ttk.Checkbutton(settings_frame, text="启用代理池", variable=self.use_proxy).grid(row=3, column=4, sticky=tk.W, padx=6)
         self.use_proxypool = tk.BooleanVar(value=False)
-        ttk.Checkbutton(settings_frame, text="使用 proxypool 框架", variable=self.use_proxypool).grid(row=3, column=5, sticky=tk.W, padx=4, pady=4)
+        ttk.Checkbutton(settings_frame, text="使用 proxypool 框架", variable=self.use_proxypool).grid(row=3, column=5, sticky=tk.W, padx=6)
 
-        ttk.Label(settings_frame, text="LLM 权重 (0-1):", style='Header.TLabel').grid(row=0, column=4, sticky=tk.W, padx=(12,0), pady=4)
+        ttk.Button(settings_frame, text="保存设置", command=self.save_config).grid(row=4, column=1, sticky=tk.W, pady=6)
+        ttk.Button(settings_frame, text="测试 LLM", command=self.test_llm_connection).grid(row=4, column=2, sticky=tk.W, pady=6, padx=4)
+        ttk.Button(settings_frame, text="测试代理", command=self.test_proxies).grid(row=4, column=3, sticky=tk.W, pady=6)
+        ttk.Label(settings_frame, text="LLM 权重 (0-1):").grid(row=0, column=4, sticky=tk.W, padx=(10,0))
         self.llm_weight = tk.DoubleVar(value=0.4)
-        ttk.Spinbox(settings_frame, from_=0.0, to=1.0, increment=0.1, textvariable=self.llm_weight, width=6).grid(row=0, column=5, sticky=tk.W, padx=4, pady=4)
-        ttk.Label(settings_frame, text="LLM 并发数:", style='Header.TLabel').grid(row=1, column=4, sticky=tk.W, padx=(12,0), pady=4)
+        ttk.Spinbox(settings_frame, from_=0.0, to=1.0, increment=0.1, textvariable=self.llm_weight, width=6).grid(row=0, column=5, sticky=tk.W)
+        ttk.Label(settings_frame, text="LLM 并发数:").grid(row=1, column=4, sticky=tk.W, padx=(10,0))
         self.llm_threads = tk.IntVar(value=4)
-        ttk.Spinbox(settings_frame, from_=1, to=10, textvariable=self.llm_threads, width=6).grid(row=1, column=5, sticky=tk.W, padx=4, pady=4)
-
-        ttk.Button(settings_frame, text="💾 保存设置", command=self.save_config, style='Action.TButton').grid(row=4, column=1, sticky=tk.W, pady=8, padx=4)
-        ttk.Button(settings_frame, text="🔌 测试 LLM", command=self.test_llm_connection, style='Action.TButton').grid(row=4, column=2, sticky=tk.W, pady=8, padx=4)
-        ttk.Button(settings_frame, text="🌐 测试代理", command=self.test_proxies, style='Action.TButton').grid(row=4, column=3, sticky=tk.W, pady=8, padx=4)
+        ttk.Spinbox(settings_frame, from_=1, to=10, textvariable=self.llm_threads, width=6).grid(row=1, column=5, sticky=tk.W)
 
         # --- Actions frame ---
         actions = ttk.Frame(self.main)
-        actions.pack(fill=tk.X, padx=6, pady=8)
-        self.start_btn = ttk.Button(actions, text="▶️ 开始采集并排行", command=self.start_scan, style='Primary.TButton')
-        self.start_btn.pack(side=tk.LEFT, padx=(0,8))
-        self.stop_btn = ttk.Button(actions, text="⏹️ 停止采集", command=self.stop_scan, state=tk.DISABLED, style='Action.TButton')
-        self.stop_btn.pack(side=tk.LEFT, padx=(0,8))
-        self.export_btn = ttk.Button(actions, text="📥 导出 CSV", command=self.export_csv, state=tk.DISABLED, style='Action.TButton')
-        self.export_btn.pack(side=tk.LEFT, padx=(0,8))
-        self.progress = ttk.Progressbar(actions, length=400, mode='determinate')
-        self.progress.pack(side=tk.RIGHT, padx=(8,0))
-        # 配置进度条样式
-        style.configure("TProgressbar", background='#4CAF50', troughcolor='#e0e0e0', borderwidth=0, lightcolor='#4CAF50', darkcolor='#4CAF50')
+        actions.pack(fill=tk.X, padx=4, pady=4)
+        self.start_btn = ttk.Button(actions, text="开始采集并排行", command=self.start_scan)
+        self.start_btn.pack(side=tk.LEFT, padx=(0,6))
+        self.stop_btn = ttk.Button(actions, text="停止采集", command=self.stop_scan, state=tk.DISABLED)
+        self.stop_btn.pack(side=tk.LEFT, padx=(0,6))
+        self.export_btn = ttk.Button(actions, text="导出 CSV", command=self.export_csv, state=tk.DISABLED)
+        self.export_btn.pack(side=tk.LEFT, padx=(0,6))
+        self.progress = ttk.Progressbar(actions, length=360)
+        self.progress.pack(side=tk.RIGHT)
 
         # --- Table frame ---
-        table_frame = ttk.LabelFrame(self.main, text="📋 排行榜", padding=8)
-        table_frame.pack(fill=tk.BOTH, expand=True, padx=6, pady=6)
+        table_frame = ttk.Frame(self.main)
+        table_frame.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
         cols = ("rank", "up_name", "rating", "videos", "views", "likes", "score", "llm_summary")
-        self.tree = ttk.Treeview(table_frame, columns=cols, show="headings", height=12)
+        self.tree = ttk.Treeview(table_frame, columns=cols, show="headings")
         # headings: show friendly Chinese label for rating
-        headings = {"rank": "排名", "up_name": "UP主", "rating": "评级", "videos": "视频数", "views": "播放量", "likes": "收藏数", "score": "分数", "llm_summary": "评价"}
+        headings = {"rank": "排名", "up_name": "up", "rating": "评级", "videos": "视频数", "views": "播放量", "likes": "收藏数", "score": "分数", "llm_summary": "评价"}
         for c in cols:
             self.tree.heading(c, text=headings.get(c, c))
             # narrow rating column
             if c == 'rating':
-                self.tree.column(c, width=100, anchor=tk.CENTER)
-            elif c == 'rank':
-                self.tree.column(c, width=60, anchor=tk.CENTER)
-            elif c == 'up_name':
-                self.tree.column(c, width=150, anchor=tk.W)
-            elif c == 'llm_summary':
-                self.tree.column(c, width=300, anchor=tk.W)
+                self.tree.column(c, width=80, anchor=tk.CENTER)
             else:
                 self.tree.column(c, width=120, anchor=tk.W)
         vsb = ttk.Scrollbar(table_frame, orient="vertical", command=self.tree.yview)
@@ -191,9 +153,9 @@ class App:
         table_frame.columnconfigure(0, weight=1)
 
         # --- Log frame ---
-        log_frame = ttk.LabelFrame(self.main, text="📝 运行日志", padding=8)
-        log_frame.pack(fill=tk.BOTH, padx=6, pady=6)
-        self.log_text = tk.Text(log_frame, height=8, wrap=tk.WORD, font=('Consolas', 9), bg='#1e1e1e', fg='#d4d4d4', insertbackground='#ffffff')
+        log_frame = ttk.LabelFrame(self.main, text="运行日志", padding=6)
+        log_frame.pack(fill=tk.BOTH, padx=4, pady=4)
+        self.log_text = tk.Text(log_frame, height=8, wrap=tk.WORD)
         lvsb = ttk.Scrollbar(log_frame, orient="vertical", command=self.log_text.yview)
         self.log_text.configure(yscrollcommand=lvsb.set)
         self.log_text.grid(row=0, column=0, sticky=tk.NSEW)
@@ -210,30 +172,12 @@ class App:
         # stop event for canceling scans
         self._stop_event = threading.Event()
 
-    def log(self, msg: str, level="info"):
-        # thread-safe append with color coding
+    def log(self, msg: str):
+        # thread-safe append
         def _append():
             timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            self.log_text.insert(tk.END, f"[{timestamp}] ", "timestamp")
-            
-            # 根据级别设置颜色
-            if level == "error":
-                self.log_text.insert(tk.END, f"{msg}\n", "error")
-            elif level == "success":
-                self.log_text.insert(tk.END, f"{msg}\n", "success")
-            elif level == "warning":
-                self.log_text.insert(tk.END, f"{msg}\n", "warning")
-            else:
-                self.log_text.insert(tk.END, f"{msg}\n", "info")
-            
+            self.log_text.insert(tk.END, f"[{timestamp}] {msg}\n")
             self.log_text.see(tk.END)
-            
-            # 配置标签颜色
-            self.log_text.tag_config("timestamp", foreground="#808080")
-            self.log_text.tag_config("info", foreground="#d4d4d4")
-            self.log_text.tag_config("success", foreground="#4CAF50")
-            self.log_text.tag_config("warning", foreground="#FF9800")
-            self.log_text.tag_config("error", foreground="#f44336")
 
         try:
             self.root.after(0, _append)
@@ -260,10 +204,10 @@ class App:
         try:
             with open(self.config_path(), "w", encoding="utf-8") as f:
                 json.dump(cfg, f, ensure_ascii=False, indent=2)
-            self.log("设置已保存", "success")
+            self.log("设置已保存")
             messagebox.showinfo("设置", "设置已保存到 config.json")
         except Exception as e:
-            self.log(f"保存设置失败: {e}", "error")
+            self.log(f"保存设置失败: {e}")
             messagebox.showerror("错误", f"保存失败: {e}")
 
     def load_config(self):
@@ -298,9 +242,9 @@ class App:
                 self.llm_threads.set(int(cfg.get("llm_threads", 4)))
             except Exception:
                 self.llm_threads.set(4)
-            self.log("已加载配置", "success")
+            self.log("已加载配置")
         except Exception as e:
-            self.log(f"加载配置失败: {e}", "warning")
+            self.log(f"加载配置失败: {e}")
 
     def test_llm_connection(self):
         provider = self.provider.get()
@@ -313,10 +257,10 @@ class App:
         self.log("正在测试 LLM 连接...")
         res = client.test_connection()
         if res.get("ok"):
-            self.log(f"LLM 连接成功: {res.get('msg')}", "success")
+            self.log(f"LLM 连接成功: {res.get('msg')}")
             messagebox.showinfo("测试连接", "连接成功")
         else:
-            self.log(f"LLM 连接失败: {res.get('msg')}", "error")
+            self.log(f"LLM 连接失败: {res.get('msg')}")
             messagebox.showerror("测试连接失败", res.get("msg"))
 
     def test_proxies(self):
@@ -344,10 +288,9 @@ class App:
         if good:
             # set pool to good ones by default
             bilibili.set_proxy_pool(good)
-            self.log(f"已将 {len(good)} 个可用代理加入代理池", "success")
+            self.log(f"已将 {len(good)} 个可用代理加入代理池")
             messagebox.showinfo("测试代理", f"{len(good)} 个代理可用，已启用")
         else:
-            self.log("没有可用的代理", "warning")
             messagebox.showwarning("测试代理", "没有可用的代理")
  
 
@@ -809,13 +752,7 @@ class App:
             except Exception:
                 label = ''
 
-            # 添加交替行颜色
-            tags = ('evenrow',) if idx % 2 == 0 else ('oddrow',)
-            item = self.tree.insert("", tk.END, values=(idx, r.get("name"), label, r.get("total_videos") or r.get("videos") or 0, r.get("views") or 0, r.get("likes") or 0, round(r.get("score", 0), 2), r.get("llm_summary", "")), tags=tags)
-        
-        # 配置交替行颜色
-        self.tree.tag_configure('evenrow', background='#f5f5f5')
-        self.tree.tag_configure('oddrow', background='white')
+            self.tree.insert("", tk.END, values=(idx, r.get("name"), label, r.get("total_videos") or r.get("videos") or 0, r.get("views") or 0, r.get("likes") or 0, round(r.get("score", 0), 2), r.get("llm_summary", "")))
 
     def export_csv(self):
         if not self.results:
