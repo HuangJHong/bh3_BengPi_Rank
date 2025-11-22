@@ -83,7 +83,7 @@ class App:
 
         # enable/disable LLM usage switch
         self.use_llm = tk.BooleanVar(value=True)
-        ttk.Checkbutton(settings_frame, text="启用 LLM", variable=self.use_llm).grid(row=0, column=6, sticky=tk.W, padx=(8,0))
+        tk.Checkbutton(settings_frame, text="启用 LLM", variable=self.use_llm).grid(row=0, column=6, sticky=tk.W, padx=(8,0))
 
         ttk.Label(settings_frame, text="LLM API Key:").grid(row=0, column=2, sticky=tk.W, padx=(10,0))
         self.api_key = tk.StringVar(value="")
@@ -99,15 +99,15 @@ class App:
 
         ttk.Label(settings_frame, text="B站 Cookie:").grid(row=2, column=0, sticky=tk.W)
         self.bil_cookie = tk.StringVar(value="")
-        ttk.Entry(settings_frame, textvariable=self.bil_cookie, width=70).grid(row=2, column=1, columnspan=3, sticky=tk.W)
+        ttk.Entry(settings_frame, textvariable=self.bil_cookie, width=70, show='*').grid(row=2, column=1, columnspan=3, sticky=tk.W)
 
         ttk.Label(settings_frame, text="代理池 (逗号分隔):").grid(row=3, column=0, sticky=tk.W)
         self.proxy_list = tk.StringVar(value="")
         ttk.Entry(settings_frame, textvariable=self.proxy_list, width=70).grid(row=3, column=1, columnspan=3, sticky=tk.W)
         self.use_proxy = tk.BooleanVar(value=False)
-        ttk.Checkbutton(settings_frame, text="启用代理池", variable=self.use_proxy).grid(row=3, column=4, sticky=tk.W, padx=6)
+        tk.Checkbutton(settings_frame, text="启用代理池", variable=self.use_proxy).grid(row=3, column=4, sticky=tk.W, padx=6)
         self.use_proxypool = tk.BooleanVar(value=False)
-        ttk.Checkbutton(settings_frame, text="使用 proxypool 框架", variable=self.use_proxypool).grid(row=3, column=5, sticky=tk.W, padx=6)
+        tk.Checkbutton(settings_frame, text="使用 proxypool 框架", variable=self.use_proxypool).grid(row=3, column=5, sticky=tk.W, padx=6)
 
         ttk.Button(settings_frame, text="保存设置", command=self.save_config).grid(row=4, column=1, sticky=tk.W, pady=6)
         ttk.Button(settings_frame, text="测试 LLM", command=self.test_llm_connection).grid(row=4, column=2, sticky=tk.W, pady=6, padx=4)
