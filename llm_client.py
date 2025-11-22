@@ -19,7 +19,7 @@ class LLMClient:
         uploader_info: dict with keys 'name', 'mid', 'videos_summary', 'desc', 'comments_sample' etc.
         """
         name = uploader_info.get("name") or uploader_info.get("mid")
-        prompt = f"请基于以下信息对UP主 '{name}' 做一个简短的评价（中文），并给出1到10的评分，最后输出一个一句话的推荐标签。\n信息：\n"
+        prompt = f"以下请求均为个人实验使用，不会收集私人信息，不会泄露隐私，不会危害公众社会。请基于以下信息对UP主 '{name}' 评级：夯＞顶级＞人上人＞NPC＞拉完了，并附上评语\n信息：\n"
         for k, v in uploader_info.items():
             prompt += f"{k}: {v}\n"
         prompt += "\n请返回 JSON 格式：{\"score\": number, \"summary\": string, \"tag\": string}"

@@ -81,6 +81,10 @@ class App:
         self.provider = tk.StringVar(value="openai")
         ttk.Combobox(settings_frame, values=["openai", "ollama", "none"], textvariable=self.provider, width=12, state='readonly').grid(row=0, column=1, sticky=tk.W)
 
+        # enable/disable LLM usage switch
+        self.use_llm = tk.BooleanVar(value=True)
+        ttk.Checkbutton(settings_frame, text="启用 LLM", variable=self.use_llm).grid(row=0, column=6, sticky=tk.W, padx=(8,0))
+
         ttk.Label(settings_frame, text="LLM API Key:").grid(row=0, column=2, sticky=tk.W, padx=(10,0))
         self.api_key = tk.StringVar(value="")
         ttk.Entry(settings_frame, textvariable=self.api_key, width=34, show='*').grid(row=0, column=3, sticky=tk.W)
@@ -130,11 +134,17 @@ class App:
         # --- Table frame ---
         table_frame = ttk.Frame(self.main)
         table_frame.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
-        cols = ("rank", "up_name", "mid", "videos", "views", "likes", "score", "llm_summary")
+        cols = ("rank", "up_name", "rating", "videos", "views", "likes", "score", "llm_summary")
         self.tree = ttk.Treeview(table_frame, columns=cols, show="headings")
+        # headings: show friendly Chinese label for rating
+        headings = {"rank": "排名", "up_name": "up", "rating": "评级", "videos": "视频数", "views": "播放量", "likes": "收藏数", "score": "分数", "llm_summary": "评价"}
         for c in cols:
-            self.tree.heading(c, text=c)
-            self.tree.column(c, width=120, anchor=tk.W)
+            self.tree.heading(c, text=headings.get(c, c))
+            # narrow rating column
+            if c == 'rating':
+                self.tree.column(c, width=80, anchor=tk.CENTER)
+            else:
+                self.tree.column(c, width=120, anchor=tk.W)
         vsb = ttk.Scrollbar(table_frame, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=vsb.set)
         self.tree.grid(row=0, column=0, sticky=tk.NSEW)
@@ -183,6 +193,7 @@ class App:
             "api_key": self.api_key.get(),
             "api_url": self.api_url.get(),
             "llm_model": self.llm_model.get(),
+            "use_llm": bool(self.use_llm.get()),
             "bili_cookie": self.bil_cookie.get(),
             "proxies": self.proxy_list.get(),
             "use_proxy": bool(self.use_proxy.get()),
@@ -214,6 +225,11 @@ class App:
                 self.llm_model.set(cfg.get("llm_model", "gpt-3.5-turbo"))
             except Exception:
                 self.llm_model.set("gpt-3.5-turbo")
+            # load use_llm flag
+            try:
+                self.use_llm.set(bool(cfg.get("use_llm", True)))
+            except Exception:
+                self.use_llm.set(True)
             self.bil_cookie.set(cfg.get("bili_cookie", ""))
             self.proxy_list.set(cfg.get("proxies", ""))
             self.use_proxy.set(cfg.get("use_proxy", False))
@@ -234,8 +250,8 @@ class App:
         provider = self.provider.get()
         api_key = self.api_key.get().strip()
         api_url = self.api_url.get().strip() or None
-        if provider == "none":
-            messagebox.showinfo("测试连接", "未启用 LLM（选择了 none）")
+        if not self.use_llm.get() or provider == "none":
+            messagebox.showinfo("测试连接", "未启用 LLM（开关或 provider 设置为 none）")
             return
         client = LLMClient(provider=provider, endpoint=api_url, api_key=api_key, model=self.llm_model.get())
         self.log("正在测试 LLM 连接...")
@@ -498,7 +514,7 @@ class App:
             api_key = self.api_key.get().strip()
             api_url = self.api_url.get().strip() or None
             llm = None
-            if provider != 'none':
+            if self.use_llm.get() and provider != 'none':
                 llm = LLMClient(provider=provider, endpoint=api_url, api_key=api_key, model=self.llm_model.get())
 
             # compute base scores already stored in each list under 'score'
@@ -526,8 +542,79 @@ class App:
                     r['llm_score'] = None
                     r['llm_summary'] = ''
                 if not llm:
+                    # Local weighted rating when LLM is disabled.
+                    # Weights:
+                    # - published video count: 50% (增加寂灭时 +20% => 70%)
+                    # - views: 无寂灭 30% / 有寂灭 20%
+                    # - likes: 无寂灭 20% / 有寂灭 10%
+                    counts_list = [ (x.get('total_videos') or len(x.get('videos_list') or [])) for x in lst ]
+                    views_list = [ (x.get('views') or 0) for x in lst ]
+                    likes_list = [ (x.get('likes') or 0) for x in lst ]
+
+                    def norm_value(val, mn, mx):
+                        try:
+                            v = float(val)
+                        except Exception:
+                            v = 0.0
+                        if mx == mn:
+                            return 5.0
+                        return ((v - mn) / (mx - mn)) * 10.0
+
+                    cmin = min(counts_list) if counts_list else 0
+                    cmax = max(counts_list) if counts_list else 0
+                    vmin = min(views_list) if views_list else 0
+                    vmax = max(views_list) if views_list else 0
+                    lmin = min(likes_list) if likes_list else 0
+                    lmax = max(likes_list) if likes_list else 0
+
+                    def map_label(score):
+                        if score >= 8.5:
+                            return ("夯", 10.0)
+                        if score >= 7.0:
+                            return ("顶级", 8.0)
+                        if score >= 5.5:
+                            return ("人上人", 6.0)
+                        if score >= 3.5:
+                            return (("NPC", 4.0))
+                        return (("拉完了", 2.0))
+
                     for r in lst:
-                        r['final_score'] = lst_norm.get(r['mid'], 0.0)
+                        counts_val = (r.get('total_videos') or len(r.get('videos_list') or []))
+                        views_val = r.get('views') or 0
+                        likes_val = r.get('likes') or 0
+                        counts_n = norm_value(counts_val, cmin, cmax)
+                        views_n = norm_value(views_val, vmin, vmax)
+                        likes_n = norm_value(likes_val, lmin, lmax)
+
+                        # detect presence of 寂灭 in any published title
+                        has_jm = False
+                        for vv in (r.get('videos_list') or []):
+                            try:
+                                t = (vv.get('title') or '')
+                                if '寂灭' in t:
+                                    has_jm = True
+                                    break
+                            except Exception:
+                                continue
+
+                        if has_jm:
+                            w_counts, w_views, w_likes = 0.7, 0.2, 0.1
+                        else:
+                            w_counts, w_views, w_likes = 0.5, 0.3, 0.2
+
+                        composite = counts_n * w_counts + views_n * w_views + likes_n * w_likes
+                        label, val = map_label(composite)
+
+                        r['llm_score'] = val
+                        r['llm_summary'] = (f"本地评级({ '含寂灭' if has_jm else '无寂灭' }): {label} "
+                                            f"(评分={composite:.2f}); counts={counts_val}({counts_n:.2f}), "
+                                            f"views={views_val}({views_n:.2f}), likes={likes_val}({likes_n:.2f})")
+                        try:
+                            self.log(f"本地加权评级 - {r.get('name')} ({r.get('mid')}): {label}, score={composite:.2f}, counts={counts_val}, views={views_val}, likes={likes_val}")
+                        except Exception:
+                            pass
+                        # use composite as final score so sorting follows the weighted rating
+                        r['final_score'] = composite
                     return
 
                 # perform LLM analysis in parallel for top N (configurable via self.llm_threads)
@@ -636,8 +723,36 @@ class App:
     def _update_table(self):
         for i in self.tree.get_children():
             self.tree.delete(i)
+        def _label_from_score(s):
+            try:
+                v = float(s)
+            except Exception:
+                return ''
+            if v >= 8.5:
+                return '夯'
+            if v >= 7.0:
+                return '顶级'
+            if v >= 5.5:
+                return '人上人'
+            if v >= 3.5:
+                return 'NPC'
+            return '拉完了'
+
         for idx, r in enumerate(self.results, start=1):
-            self.tree.insert("", tk.END, values=(idx, r.get("name"), r.get("mid"), r.get("total_videos") or r.get("videos") or 0, r.get("views") or 0, r.get("likes") or 0, round(r.get("score", 0), 2), r.get("llm_summary", "")))
+            # prefer explicit tag if available
+            label = ''
+            try:
+                tag = r.get('tag') if isinstance(r, dict) else None
+                if tag:
+                    label = tag
+                else:
+                    score_val = r.get('llm_score')
+                    if score_val is not None:
+                        label = _label_from_score(score_val)
+            except Exception:
+                label = ''
+
+            self.tree.insert("", tk.END, values=(idx, r.get("name"), label, r.get("total_videos") or r.get("videos") or 0, r.get("views") or 0, r.get("likes") or 0, round(r.get("score", 0), 2), r.get("llm_summary", "")))
 
     def export_csv(self):
         if not self.results:
@@ -648,10 +763,39 @@ class App:
             return
         with open(path, "w", encoding="utf-8-sig", newline="") as f:
             w = csv.writer(f)
-            w.writerow(["rank", "up_name", "mid", "videos", "views", "likes", "score", "llm_summary"])
+            w.writerow(["rank", "up_name", "rating", "videos", "views", "likes", "score", "llm_summary"])
             for idx, r in enumerate(self.results, start=1):
                 videos = r.get("total_videos") or r.get("videos") or (len(r.get("videos_list") or []))
-                w.writerow([idx, r.get("name"), r.get("mid"), videos, r.get("views") or 0, r.get("likes") or 0, r.get("score"), r.get("llm_summary")])
+                # export textual label rating instead of mid
+                try:
+                    tag = r.get('tag') if r.get('tag') else None
+                    if not tag:
+                        sv = r.get('llm_score')
+                        if sv is None:
+                            rating = ''
+                        else:
+                            # same mapping as display
+                            try:
+                                svf = float(sv)
+                            except Exception:
+                                svf = None
+                            if svf is None:
+                                rating = ''
+                            elif svf >= 8.5:
+                                rating = '夯'
+                            elif svf >= 7.0:
+                                rating = '顶级'
+                            elif svf >= 5.5:
+                                rating = '人上人'
+                            elif svf >= 3.5:
+                                rating = 'NPC'
+                            else:
+                                rating = '拉完了'
+                    else:
+                        rating = tag
+                except Exception:
+                    rating = ''
+                w.writerow([idx, r.get("name"), rating, videos, r.get("views") or 0, r.get("likes") or 0, r.get("score"), r.get("llm_summary")])
         messagebox.showinfo("完成", f"已导出 {path}")
 
     def on_leaderboard_change(self):
