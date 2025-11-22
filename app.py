@@ -89,6 +89,10 @@ class App:
         self.api_url = tk.StringVar(value="")
         ttk.Entry(settings_frame, textvariable=self.api_url, width=50).grid(row=1, column=1, columnspan=3, sticky=tk.W, pady=2)
 
+        ttk.Label(settings_frame, text="LLM Model:").grid(row=2, column=4, sticky=tk.W, padx=(10,0))
+        self.llm_model = tk.StringVar(value="gpt-3.5-turbo")
+        ttk.Entry(settings_frame, textvariable=self.llm_model, width=20).grid(row=2, column=5, sticky=tk.W)
+
         ttk.Label(settings_frame, text="B站 Cookie:").grid(row=2, column=0, sticky=tk.W)
         self.bil_cookie = tk.StringVar(value="")
         ttk.Entry(settings_frame, textvariable=self.bil_cookie, width=70).grid(row=2, column=1, columnspan=3, sticky=tk.W)
@@ -178,6 +182,7 @@ class App:
             "provider": self.provider.get(),
             "api_key": self.api_key.get(),
             "api_url": self.api_url.get(),
+            "llm_model": self.llm_model.get(),
             "bili_cookie": self.bil_cookie.get(),
             "proxies": self.proxy_list.get(),
             "use_proxy": bool(self.use_proxy.get()),
@@ -204,6 +209,11 @@ class App:
             self.provider.set(cfg.get("provider", "openai"))
             self.api_key.set(cfg.get("api_key", ""))
             self.api_url.set(cfg.get("api_url", ""))
+            # load model name if present
+            try:
+                self.llm_model.set(cfg.get("llm_model", "gpt-3.5-turbo"))
+            except Exception:
+                self.llm_model.set("gpt-3.5-turbo")
             self.bil_cookie.set(cfg.get("bili_cookie", ""))
             self.proxy_list.set(cfg.get("proxies", ""))
             self.use_proxy.set(cfg.get("use_proxy", False))
@@ -227,7 +237,7 @@ class App:
         if provider == "none":
             messagebox.showinfo("测试连接", "未启用 LLM（选择了 none）")
             return
-        client = LLMClient(provider=provider, endpoint=api_url, api_key=api_key)
+        client = LLMClient(provider=provider, endpoint=api_url, api_key=api_key, model=self.llm_model.get())
         self.log("正在测试 LLM 连接...")
         res = client.test_connection()
         if res.get("ok"):
@@ -489,7 +499,7 @@ class App:
             api_url = self.api_url.get().strip() or None
             llm = None
             if provider != 'none':
-                llm = LLMClient(provider=provider, endpoint=api_url, api_key=api_key)
+                llm = LLMClient(provider=provider, endpoint=api_url, api_key=api_key, model=self.llm_model.get())
 
             # compute base scores already stored in each list under 'score'
             def normalize_scores(lst):
@@ -574,6 +584,18 @@ class App:
                         summary_text = r['llm_summary'] or ''
                         short = (summary_text[:400] + '...') if len(summary_text) > 400 else summary_text
                         self.log(f"LLM 分析 - {r.get('name')} ({r.get('mid')}): score={llm_score}, summary={short}")
+                    except Exception:
+                        pass
+                    # also log raw model output if available (truncated)
+                    try:
+                        raw_text = ''
+                        if isinstance(out, dict):
+                            raw_text = out.get('raw') or out.get('_raw') or ''
+                        else:
+                            raw_text = str(out)
+                        if raw_text:
+                            short_raw = (raw_text[:1000] + '...') if len(raw_text) > 1000 else raw_text
+                            self.log(f"LLM 原始输出 - {r.get('name')} ({r.get('mid')}): {short_raw}")
                     except Exception:
                         pass
 

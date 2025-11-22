@@ -8,10 +8,11 @@ from typing import Dict, Any
 
 
 class LLMClient:
-    def __init__(self, provider: str = "openai", endpoint: str = None, api_key: str = None):
+    def __init__(self, provider: str = "openai", endpoint: str = None, api_key: str = None, model: str = None):
         self.provider = provider
         self.endpoint = endpoint
         self.api_key = api_key or os.getenv("OPENAI_API_KEY")
+        self.model = model or "gpt-3.5-turbo"
 
     def analyze_uploader(self, uploader_info: Dict[str, Any], top_videos: list = None) -> Dict[str, Any]:
         """Return a short evaluation and numeric score (1-10).
@@ -50,7 +51,7 @@ class LLMClient:
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
         data = {
-            "model": "gpt-3.5-turbo",
+            "model": self.model,
             "messages": [{"role": "user", "content": prompt}],
             "max_tokens": 300,
             "temperature": 0.2,
@@ -67,16 +68,24 @@ class LLMClient:
             text = j.get("output", j.get("text", ""))
             if isinstance(text, list):
                 text = "\n".join([t.get("content", "") if isinstance(t, dict) else str(t) for t in text])
-        return self._parse_json_like(text)
+        parsed = self._parse_json_like(text)
+        if isinstance(parsed, dict):
+            parsed.setdefault('raw', text)
+            return parsed
+        return {'raw': text}
 
     def _call_ollama(self, prompt: str) -> Dict[str, Any]:
         # default ollama endpoint
         endpoint = self.endpoint or "http://127.0.0.1:11434/api/generate"
-        data = {"model": "llama2", "prompt": prompt, "max_tokens": 300}
+        data = {"model": self.model or "llama2", "prompt": prompt, "max_tokens": 300}
         r = requests.post(endpoint, json=data, timeout=30)
         r.raise_for_status()
         text = r.text
-        return self._parse_json_like(text)
+        parsed = self._parse_json_like(text)
+        if isinstance(parsed, dict):
+            parsed.setdefault('raw', text)
+            return parsed
+        return {'raw': text}
 
     def _parse_json_like(self, text: str) -> Dict[str, Any]:
         # try to extract a JSON object from model output heuristically
@@ -115,7 +124,7 @@ class LLMClient:
                 if self.api_key:
                     headers["Authorization"] = f"Bearer {self.api_key}"
                 data = {
-                    "model": "gpt-3.5-turbo",
+                    "model": self.model,
                     "messages": [{"role": "user", "content": "测试连接"}],
                     "max_tokens": 1,
                 }
@@ -125,7 +134,7 @@ class LLMClient:
                 return {"ok": False, "msg": f"HTTP {r.status_code}: {r.text[:200]}"}
             elif self.provider == "ollama":
                 endpoint = self.endpoint or "http://127.0.0.1:11434/api/generate"
-                data = {"model": "llama2", "prompt": "测试连接", "max_tokens": 1}
+                data = {"model": self.model or "llama2", "prompt": "测试连接", "max_tokens": 1}
                 r = requests.post(endpoint, json=data, timeout=10)
                 if r.status_code == 200:
                     return {"ok": True, "msg": "Ollama 连接成功"}
