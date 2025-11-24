@@ -14,6 +14,12 @@
 - [技术栈](#技术栈)
 - [注意事项](#注意事项)
 
+## b站Cookie获取
+1、浏览器登录b站账号后，按F12打开开发模式，点击控制台，然后输入document.cookie 回车就可以看到cookie了
+2、电脑打开 Chrome / Edge，无痕模式登录 https://www.bilibili.com（无痕能减少插件干扰，降低 Cookie 被轮换的概率）。登录成功后，保持该标签页处于已登录状态，按 F12 → 切到 Network（网络） 面板 → 勾选 Preserve log（保留日志）。
+在地址栏再回车一次或 Ctrl + R，让页面重新加载，会刷出很多请求。找到列表最上方 Name 为 www.bilibili.com 的那条请求，点进去 → 右侧 Headers → Request Headers → 找到 cookie: 这一行，把整串值复制下来即可。核心字段只要 SESSDATA=xxx; bili_jct=xxx; DedeUserID=xxx 这三段就能通过大部分接口校验，其他字段可选。复制后立刻粘贴到本地 cookie.txt 或项目配置里，不要截图、不要发给别人，Cookie 等效于账号+密码。
+
+
 ## ✨ 功能特性
 
 ### 核心功能
