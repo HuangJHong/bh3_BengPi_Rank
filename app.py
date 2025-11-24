@@ -157,6 +157,11 @@ class App:
         self.export_btn.pack(side=tk.LEFT, padx=(0,6))
         self.exclude_outliers = tk.BooleanVar(value=False)
         ttk.Checkbutton(actions, text="排除异常数据", variable=self.exclude_outliers, command=self.on_outlier_toggle).pack(side=tk.LEFT, padx=(10,6))
+        ttk.Label(actions, text="阈值系数:").pack(side=tk.LEFT, padx=(4,2))
+        self.outlier_sigma = tk.DoubleVar(value=2.5)
+        sigma_spin = ttk.Spinbox(actions, from_=1.0, to=5.0, increment=0.1, textvariable=self.outlier_sigma, width=4, command=self.on_outlier_sigma_change)
+        sigma_spin.pack(side=tk.LEFT, padx=(0,6))
+        self.outlier_sigma.trace_add("write", lambda *args: self.on_outlier_sigma_change())
         self.progress = ttk.Progressbar(actions, length=360)
         self.progress.pack(side=tk.RIGHT)
 
@@ -194,6 +199,7 @@ class App:
 
         self.weight_configs = copy.deepcopy(DEFAULT_WEIGHT_PRESETS)
         self._weight_win = None
+        self._suppress_sigma_callback = False
         self.results = []
         self.results_by_category_raw = {}
         self.results_by_category = {}
@@ -236,6 +242,7 @@ class App:
             "llm_threads": int(self.llm_threads.get()),
             "crawl_threads": int(self.crawl_threads.get()),
             "weight_configs": self.weight_configs,
+            "outlier_sigma": float(self.outlier_sigma.get()),
         }
         try:
             with open(self.config_path(), "w", encoding="utf-8") as f:
@@ -286,6 +293,11 @@ class App:
                 self._apply_weight_config(cfg.get("weight_configs"))
             except Exception:
                 self.weight_configs = copy.deepcopy(DEFAULT_WEIGHT_PRESETS)
+            try:
+                val = float(cfg.get("outlier_sigma", 2.5))
+                self.outlier_sigma.set(max(0.5, min(10.0, val)))
+            except Exception:
+                self.outlier_sigma.set(2.5)
             self.log("已加载配置")
         except Exception as e:
             self.log(f"加载配置失败: {e}")
@@ -661,6 +673,30 @@ class App:
         except Exception:
             pass
 
+    def on_outlier_sigma_change(self):
+        if getattr(self, "_suppress_sigma_callback", False):
+            return
+        try:
+            val = float(self.outlier_sigma.get())
+        except Exception:
+            return
+        val = max(0.5, min(10.0, val))
+        if abs(val - float(self.outlier_sigma.get())) > 1e-4:
+            self._suppress_sigma_callback = True
+            self.outlier_sigma.set(round(val, 2))
+            self._suppress_sigma_callback = False
+        if not self.results_by_category_raw:
+            return
+        self._rebuild_filtered_results()
+        sel = self.leaderboard_var.get()
+        fallback = self.results_by_category_raw.get(sel, [])
+        self.results = self.results_by_category.get(sel, fallback)
+        self._update_table()
+        try:
+            self.log(f"异常数据阈值系数已更新为 {val:.2f}")
+        except Exception:
+            pass
+
     def _rebuild_filtered_results(self):
         """Rebuild filtered results based on current outlier exclusion setting."""
         base = getattr(self, "results_by_category_raw", {}) or {}
@@ -699,6 +735,11 @@ class App:
             return records
         metrics = ["total_videos", "views", "favorites", "likes", "desc_len"]
         thresholds = {}
+        try:
+            sigma = float(self.outlier_sigma.get())
+        except Exception:
+            sigma = 2.5
+        sigma = max(0.5, min(10.0, sigma))
         for metric in metrics:
             vals = []
             for r in records:
@@ -713,7 +754,7 @@ class App:
             std_val = statistics.pstdev(vals)
             if std_val == 0:
                 continue
-            thresholds[metric] = mean_val + std_val * 2.5
+            thresholds[metric] = mean_val + std_val * sigma
         if not thresholds:
             return records
         filtered = []
