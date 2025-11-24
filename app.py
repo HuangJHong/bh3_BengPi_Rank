@@ -5,7 +5,7 @@ import threading
 import concurrent.futures
 import requests
 import tkinter as tk
-from tkinter import ttk, messagebox, filedialog
+from tkinter import ttk, messagebox, filedialog, simpledialog
 from datetime import datetime
 import csv
 import traceback
@@ -145,6 +145,7 @@ class App:
         ttk.Button(settings_frame, text="测试 LLM", command=self.test_llm_connection).grid(row=4, column=3, sticky=tk.W, pady=6, padx=4)
         ttk.Button(settings_frame, text="测试代理", command=self.test_proxies).grid(row=4, column=4, sticky=tk.W, pady=6)
         ttk.Button(settings_frame, text="配置评分权重", command=self.open_weight_config).grid(row=4, column=5, sticky=tk.W, pady=6, padx=4)
+        ttk.Button(settings_frame, text="排除名单", command=self.edit_blacklist).grid(row=4, column=6, sticky=tk.W, pady=6, padx=4)
 
         # --- Actions frame ---
         actions = ttk.Frame(self.main)
@@ -200,6 +201,8 @@ class App:
         self.weight_configs = copy.deepcopy(DEFAULT_WEIGHT_PRESETS)
         self._weight_win = None
         self._suppress_sigma_callback = False
+        self.banned_upnames = set()
+        self._results_unfiltered = {}
         self.results = []
         self.results_by_category_raw = {}
         self.results_by_category = {}
@@ -243,6 +246,7 @@ class App:
             "crawl_threads": int(self.crawl_threads.get()),
             "weight_configs": self.weight_configs,
             "outlier_sigma": float(self.outlier_sigma.get()),
+            "blacklist": sorted(self.banned_upnames),
         }
         try:
             with open(self.config_path(), "w", encoding="utf-8") as f:
@@ -298,6 +302,12 @@ class App:
                 self.outlier_sigma.set(max(0.5, min(10.0, val)))
             except Exception:
                 self.outlier_sigma.set(2.5)
+            try:
+                bl = cfg.get("blacklist") or []
+                if isinstance(bl, list):
+                    self.banned_upnames = {str(x).strip() for x in bl if str(x).strip()}
+            except Exception:
+                self.banned_upnames = set()
             self.log("已加载配置")
         except Exception as e:
             self.log(f"加载配置失败: {e}")
@@ -782,7 +792,7 @@ class App:
                 pass
         return filtered or records
 
-    def _refresh_results_with_new_weights(self, silent=False):
+    def _refresh_results_with_new_weights(self, silent=False, update_ui=True):
         if not self.results_by_category_raw:
             return
         try:
@@ -805,15 +815,31 @@ class App:
                         r['final_score'] = final
                         r['score'] = round(final, 3)
             self._rebuild_filtered_results()
-            current_category = self.leaderboard_var.get()
-            fallback = self.results_by_category_raw.get(current_category, [])
-            self.results = self.results_by_category.get(current_category, fallback)
-            self._update_table()
+            if update_ui:
+                try:
+                    current_category = self.leaderboard_var.get()
+                except Exception:
+                    current_category = "总榜"
+                fallback = self.results_by_category_raw.get(current_category, [])
+                self.results = self.results_by_category.get(current_category, fallback) or fallback
+                try:
+                    self._update_table()
+                except Exception:
+                    pass
         except Exception as e:
             try:
                 self.log(f"重算权重时出错: {e}")
             except Exception:
                 pass
+
+    def _apply_results_to_ui(self):
+        try:
+            current_category = self.leaderboard_var.get()
+        except Exception:
+            current_category = "总榜"
+        fallback = self.results_by_category_raw.get(current_category, [])
+        self.results = self.results_by_category.get(current_category, fallback) or fallback
+        self._update_table()
 
     def _close_weight_window(self):
         if self._weight_win and self._weight_win.winfo_exists():
@@ -871,6 +897,47 @@ class App:
         ttk.Button(btn_frame, text="保存", command=lambda: self._save_weight_config(entries)).pack(side=tk.LEFT, padx=4)
         ttk.Button(btn_frame, text="取消", command=self._close_weight_window).pack(side=tk.LEFT, padx=4)
         win.protocol("WM_DELETE_WINDOW", self._close_weight_window)
+
+    def edit_blacklist(self):
+        items = sorted(self.banned_upnames)
+        current = ",".join(items)
+        resp = simpledialog.askstring("UP 黑名单", "请输入要排除的UP名称（逗号分隔）:", initialvalue=current, parent=self.root)
+        if resp is None:
+            return
+        new_items = [x.strip() for x in resp.split(",") if x.strip()]
+        self.banned_upnames = set(new_items)
+        self._refresh_results_with_blacklist()
+        try:
+            self.log(f"黑名单已更新，共 {len(self.banned_upnames)} 个UP")
+        except Exception:
+            pass
+
+    def _refresh_results_with_blacklist(self, update_ui=True):
+        base = getattr(self, "_results_unfiltered", {})
+        if not base:
+            return
+        ban = { (x or "").strip().lower() for x in self.banned_upnames if (x or "").strip() }
+        filtered_raw = {}
+        for name, lst in base.items():
+            source = lst or []
+            cleaned = []
+            removed = []
+            for r in source:
+                uname = (r.get('name') or '').strip()
+                if ban and uname.lower() in ban:
+                    removed.append(uname)
+                    continue
+                cleaned.append(copy.deepcopy(r))
+            filtered_raw[name] = cleaned
+            if removed:
+                try:
+                    sample = ", ".join(removed[:3])
+                    extra = "" if len(removed) <= 3 else f"...(+{len(removed)-3})"
+                    self.log(f"{name}: 黑名单排除 {len(removed)} 个UP: {sample}{extra}")
+                except Exception:
+                    pass
+        self.results_by_category_raw = filtered_raw
+        self._refresh_results_with_new_weights(silent=not update_ui, update_ui=update_ui)
 
     def _scan_worker(self):
             keywords = [k.strip() for k in self.kv.get().split(',') if k.strip()]
@@ -1165,12 +1232,13 @@ class App:
                     r['score'] = round(r.get('final_score', r.get('score', 0)), 3)
 
             self._llm_used_last = bool(llm)
-            self.results_by_category_raw = {"总榜": overall, "深渊榜": abyss, "战场榜": battle}
-            self._rebuild_filtered_results()
-            current_category = self.leaderboard_var.get()
-            fallback_lst = self.results_by_category_raw.get(current_category, overall)
-            self.results = self.results_by_category.get(current_category, fallback_lst)
-            self.root.after(0, self._update_table)
+            self._results_unfiltered = {
+                "总榜": copy.deepcopy(overall),
+                "深渊榜": copy.deepcopy(abyss),
+                "战场榜": copy.deepcopy(battle),
+            }
+            self._refresh_results_with_blacklist(update_ui=False)
+            self.root.after(0, self._apply_results_to_ui)
             self.root.after(0, lambda: self.start_btn.config(state=tk.NORMAL))
             self.root.after(0, lambda: self.export_btn.config(state=tk.NORMAL))
             self.root.after(0, lambda: self.stop_btn.config(state=tk.DISABLED))
