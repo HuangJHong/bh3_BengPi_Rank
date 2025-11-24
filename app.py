@@ -11,6 +11,8 @@ import csv
 import traceback
 import os
 import json
+import statistics
+import copy
 
 from bilibili import collect_by_keyword, get_last_response, set_crawl_workers
 from llm_client import LLMClient
@@ -29,6 +31,26 @@ DEFAULT_KEYWORDS = [
     "崩坏3 红莲",
     "崩坏3 乐土",
 ]
+
+WEIGHT_METRICS = [
+    ("counts", "视频数量"),
+    ("views", "播放量"),
+    ("desc", "简介字数"),
+    ("favorites", "收藏数"),
+    ("likes", "点赞数"),
+]
+
+WEIGHT_PRESET_LABELS = {
+    "normal": "常规（默认）",
+    "jm": "含寂灭视频",
+    "top1": "含榜一视频",
+}
+
+DEFAULT_WEIGHT_PRESETS = {
+    "normal": {"counts": 0.3, "views": 0.3, "desc": 0.1, "favorites": 0.15, "likes": 0.15},
+    "jm": {"counts": 0.4, "views": 0.3, "desc": 0.1, "favorites": 0.1, "likes": 0.1},
+    "top1": {"counts": 0.5, "views": 0.2, "desc": 0.1, "favorites": 0.1, "likes": 0.1},
+}
 
 
 class App:
@@ -122,6 +144,7 @@ class App:
         ttk.Button(settings_frame, text="保存设置", command=self.save_config).grid(row=4, column=2, sticky=tk.W, pady=6, padx=4)
         ttk.Button(settings_frame, text="测试 LLM", command=self.test_llm_connection).grid(row=4, column=3, sticky=tk.W, pady=6, padx=4)
         ttk.Button(settings_frame, text="测试代理", command=self.test_proxies).grid(row=4, column=4, sticky=tk.W, pady=6)
+        ttk.Button(settings_frame, text="配置评分权重", command=self.open_weight_config).grid(row=4, column=5, sticky=tk.W, pady=6, padx=4)
 
         # --- Actions frame ---
         actions = ttk.Frame(self.main)
@@ -132,6 +155,8 @@ class App:
         self.stop_btn.pack(side=tk.LEFT, padx=(0,6))
         self.export_btn = ttk.Button(actions, text="导出 CSV", command=self.export_csv, state=tk.DISABLED)
         self.export_btn.pack(side=tk.LEFT, padx=(0,6))
+        self.exclude_outliers = tk.BooleanVar(value=False)
+        ttk.Checkbutton(actions, text="排除异常数据", variable=self.exclude_outliers, command=self.on_outlier_toggle).pack(side=tk.LEFT, padx=(10,6))
         self.progress = ttk.Progressbar(actions, length=360)
         self.progress.pack(side=tk.RIGHT)
 
@@ -167,7 +192,12 @@ class App:
         log_frame.rowconfigure(0, weight=1)
         log_frame.columnconfigure(0, weight=1)
 
+        self.weight_configs = copy.deepcopy(DEFAULT_WEIGHT_PRESETS)
+        self._weight_win = None
         self.results = []
+        self.results_by_category_raw = {}
+        self.results_by_category = {}
+        self._llm_used_last = False
         # load saved config if exists
         try:
             self.load_config()
@@ -205,6 +235,7 @@ class App:
             "llm_weight": float(self.llm_weight.get()),
             "llm_threads": int(self.llm_threads.get()),
             "crawl_threads": int(self.crawl_threads.get()),
+            "weight_configs": self.weight_configs,
         }
         try:
             with open(self.config_path(), "w", encoding="utf-8") as f:
@@ -251,6 +282,10 @@ class App:
                 self.crawl_threads.set(int(cfg.get("crawl_threads", 3)))
             except Exception:
                 self.crawl_threads.set(3)
+            try:
+                self._apply_weight_config(cfg.get("weight_configs"))
+            except Exception:
+                self.weight_configs = copy.deepcopy(DEFAULT_WEIGHT_PRESETS)
             self.log("已加载配置")
         except Exception as e:
             self.log(f"加载配置失败: {e}")
@@ -426,6 +461,376 @@ class App:
                 res.append(p)
         return res
 
+    def _map_label(self, score):
+        try:
+            v = float(score)
+        except Exception:
+            v = 0.0
+        if v >= 8.5:
+            return '夯', 10.0
+        if v >= 7.0:
+            return '顶级', 8.0
+        if v >= 5.5:
+            return '人上人', 6.0
+        if v >= 3.5:
+            return 'NPC', 4.0
+        return '拉完了', 2.0
+
+    def _get_weight_preset(self, preset_key: str):
+        base = DEFAULT_WEIGHT_PRESETS.get(preset_key, DEFAULT_WEIGHT_PRESETS['normal'])
+        custom = self.weight_configs.get(preset_key) if isinstance(self.weight_configs, dict) else None
+        out = base.copy()
+        if isinstance(custom, dict):
+            for metric, _ in WEIGHT_METRICS:
+                try:
+                    val = float(custom.get(metric, out.get(metric, 0.0)))
+                except Exception:
+                    val = out.get(metric, 0.0)
+                out[metric] = max(0.0, val)
+        total = sum(out.values()) or 1.0
+        for k in out:
+            out[k] = out[k] / total
+        return out
+
+    def _apply_weight_config(self, cfg):
+        sanitized = copy.deepcopy(DEFAULT_WEIGHT_PRESETS)
+        if isinstance(cfg, dict):
+            for preset, defaults in DEFAULT_WEIGHT_PRESETS.items():
+                incoming = cfg.get(preset)
+                if not isinstance(incoming, dict):
+                    continue
+                for metric, _ in WEIGHT_METRICS:
+                    try:
+                        val = float(incoming.get(metric, defaults[metric]))
+                    except Exception:
+                        val = defaults[metric]
+                    sanitized[preset][metric] = max(0.0, val)
+        # ensure normalization
+        for preset in sanitized:
+            total = sum(sanitized[preset].values()) or 1.0
+            for metric in sanitized[preset]:
+                sanitized[preset][metric] = sanitized[preset][metric] / total
+        self.weight_configs = sanitized
+
+    def _norm_value(self, val, mn, mx):
+        try:
+            v = float(val)
+        except Exception:
+            v = 0.0
+        if mx == mn:
+            return 5.0
+        return ((v - mn) / (mx - mn)) * 10.0
+
+    def _prepare_weighted_metrics(self, lst):
+        if not lst:
+            return
+        counts_list = [(x.get('total_videos') or len(x.get('videos_list') or [])) for x in lst]
+        views_list = [(x.get('views') or 0) for x in lst]
+        likes_list = [(x.get('likes') or 0) for x in lst]
+        favorites_list = [(x.get('favorites') or 0) for x in lst]
+        desc_len_list = [(x.get('desc_len') or 0) for x in lst]
+
+        cmin, cmax = (min(counts_list), max(counts_list)) if counts_list else (0, 0)
+        vmin, vmax = (min(views_list), max(views_list)) if views_list else (0, 0)
+        lmin, lmax = (min(likes_list), max(likes_list)) if likes_list else (0, 0)
+        fmin, fmax = (min(favorites_list), max(favorites_list)) if favorites_list else (0, 0)
+        dmin, dmax = (min(desc_len_list), max(desc_len_list)) if desc_len_list else (0, 0)
+
+        for r in lst:
+            counts_val = (r.get('total_videos') or len(r.get('videos_list') or []))
+            views_val = r.get('views') or 0
+            likes_val = r.get('likes') or 0
+            favorites_val = r.get('favorites') or 0
+            desc_len_val = r.get('desc_len') or 0
+
+            counts_n = self._norm_value(counts_val, cmin, cmax)
+            views_n = self._norm_value(views_val, vmin, vmax)
+            likes_n = self._norm_value(likes_val, lmin, lmax)
+            favorites_n = self._norm_value(favorites_val, fmin, fmax)
+            desc_len_n = self._norm_value(desc_len_val, dmin, dmax)
+
+            has_jm = False
+            has_top1 = False
+            for vv in (r.get('videos_list') or []):
+                try:
+                    t = (vv.get('title') or '')
+                    if '寂灭' in t:
+                        has_jm = True
+                    if '榜一' in t:
+                        has_top1 = True
+                except Exception:
+                    continue
+
+            if has_top1:
+                weights = self._get_weight_preset('top1')
+                rule_label = '含榜一'
+            elif has_jm:
+                weights = self._get_weight_preset('jm')
+                rule_label = '含寂灭'
+            else:
+                weights = self._get_weight_preset('normal')
+                rule_label = '常规'
+            w_counts = weights.get('counts', 0.3)
+            w_views = weights.get('views', 0.3)
+            w_desc = weights.get('desc', 0.1)
+            w_fav = weights.get('favorites', 0.15)
+            w_likes = weights.get('likes', 0.15)
+
+            composite = (
+                counts_n * w_counts
+                + views_n * w_views
+                + desc_len_n * w_desc
+                + favorites_n * w_fav
+                + likes_n * w_likes
+            )
+
+            r['weighted_score'] = composite
+            r['_local_metrics'] = {
+                "counts_val": counts_val,
+                "views_val": views_val,
+                "likes_val": likes_val,
+                "favorites_val": favorites_val,
+                "desc_len_val": desc_len_val,
+                "counts_n": counts_n,
+                "views_n": views_n,
+                "likes_n": likes_n,
+                "favorites_n": favorites_n,
+                "desc_len_n": desc_len_n,
+                "rule_label": rule_label,
+            }
+
+    def _normalize_scores(self, lst):
+        vals = [x.get('weighted_score', x.get('score', 0)) for x in lst]
+        if not vals:
+            return {}
+        mn = min(vals)
+        mx = max(vals)
+        if mx == mn:
+            return {x['mid']: 5.0 for x in lst}
+        out = {}
+        for x in lst:
+            base_val = x.get('weighted_score', x.get('score', 0))
+            out[x['mid']] = self._norm_value(base_val, mn, mx)
+        return out
+
+    def _apply_local_summaries(self, lst, log_output=True):
+        for r in lst:
+            composite = r.get('weighted_score', 5.0)
+            metrics = r.get('_local_metrics') or {}
+            label, val = self._map_label(composite)
+            counts_val = metrics.get('counts_val', r.get('total_videos') or 0)
+            views_val = metrics.get('views_val', r.get('views') or 0)
+            likes_val = metrics.get('likes_val', r.get('likes') or 0)
+            favorites_val = metrics.get('favorites_val', r.get('favorites') or 0)
+            desc_len_val = metrics.get('desc_len_val', r.get('desc_len') or 0)
+            counts_n = metrics.get('counts_n', 5.0)
+            views_n = metrics.get('views_n', 5.0)
+            likes_n = metrics.get('likes_n', 5.0)
+            favorites_n = metrics.get('favorites_n', 5.0)
+            desc_len_n = metrics.get('desc_len_n', 5.0)
+            rule_label = metrics.get('rule_label', '常规')
+
+            r['llm_score'] = val
+            r['llm_summary'] = (
+                f"本地评级({rule_label}): {label} (评分={composite:.2f}); "
+                f"counts={counts_val}({counts_n:.2f}), views={views_val}({views_n:.2f}), "
+                f"desc_len={desc_len_val}({desc_len_n:.2f}), favorites={favorites_val}({favorites_n:.2f}), "
+                f"likes={likes_val}({likes_n:.2f})"
+            )
+            if log_output:
+                try:
+                    self.log(
+                        f"本地加权评级 - {r.get('name')} ({r.get('mid')}): {label}, score={composite:.2f}, "
+                        f"counts={counts_val}, views={views_val}, desc_len={desc_len_val}, "
+                        f"favorites={favorites_val}, likes={likes_val}, rule={rule_label}"
+                    )
+                except Exception:
+                    pass
+            r['final_score'] = composite
+            r['score'] = round(composite, 3)
+
+    def on_outlier_toggle(self):
+        """Callback when user toggles the outlier exclusion option."""
+        self._rebuild_filtered_results()
+        sel = self.leaderboard_var.get()
+        fallback = self.results_by_category_raw.get(sel, [])
+        self.results = self.results_by_category.get(sel, fallback)
+        self._update_table()
+        try:
+            self.log(f"{'已启用' if self.exclude_outliers.get() else '已关闭'}异常数据排除开关")
+        except Exception:
+            pass
+
+    def _rebuild_filtered_results(self):
+        """Rebuild filtered results based on current outlier exclusion setting."""
+        base = getattr(self, "results_by_category_raw", {}) or {}
+        filtered = {}
+        llm_enabled = bool(getattr(self, "_llm_used_last", False))
+        llm_weight = max(0.0, min(1.0, float(self.llm_weight.get())))
+        for name, lst in base.items():
+            if not lst:
+                filtered[name] = []
+                continue
+            working_src = self._filter_outliers(lst) if self.exclude_outliers.get() else lst
+            working = copy.deepcopy(working_src)
+            self._prepare_weighted_metrics(working)
+            if not llm_enabled:
+                self._apply_local_summaries(working, log_output=False)
+                filtered[name] = working
+                continue
+
+            lst_norm = self._normalize_scores(working)
+            for r in working:
+                mid = r.get('mid')
+                base_norm = lst_norm.get(mid, r.get('weighted_score', 5.0))
+                llm_score = r.get('llm_score')
+                if llm_score is None:
+                    final = base_norm
+                else:
+                    final = (1.0 - llm_weight) * base_norm + llm_weight * llm_score
+                r['final_score'] = final
+                r['score'] = round(final, 3)
+            filtered[name] = working
+        self.results_by_category = filtered
+
+    def _filter_outliers(self, records):
+        """Remove records whose metrics deviate abnormally from the group."""
+        if not records or len(records) < 3:
+            return records
+        metrics = ["total_videos", "views", "favorites", "likes", "desc_len"]
+        thresholds = {}
+        for metric in metrics:
+            vals = []
+            for r in records:
+                try:
+                    val = float(r.get(metric) or 0)
+                except Exception:
+                    val = 0.0
+                vals.append(val)
+            if len(vals) < 5:
+                continue
+            mean_val = sum(vals) / len(vals)
+            std_val = statistics.pstdev(vals)
+            if std_val == 0:
+                continue
+            thresholds[metric] = mean_val + std_val * 2.5
+        if not thresholds:
+            return records
+        filtered = []
+        removed = []
+        for r in records:
+            flagged = False
+            for metric, limit in thresholds.items():
+                try:
+                    value = float(r.get(metric) or 0)
+                except Exception:
+                    value = 0.0
+                if value > limit:
+                    flagged = True
+                    break
+            if flagged:
+                removed.append(r)
+            else:
+                filtered.append(r)
+        if removed:
+            try:
+                sample_names = ", ".join((x.get("name") or "未知") for x in removed[:3])
+                extra = "" if len(removed) <= 3 else f"...(+{len(removed)-3})"
+                self.log(f"排除 {len(removed)} 个疑似异常UP: {sample_names}{extra}")
+            except Exception:
+                pass
+        return filtered or records
+
+    def _refresh_results_with_new_weights(self, silent=False):
+        if not self.results_by_category_raw:
+            return
+        try:
+            for lst in self.results_by_category_raw.values():
+                self._prepare_weighted_metrics(lst)
+            if not self._llm_used_last:
+                for lst in self.results_by_category_raw.values():
+                    self._apply_local_summaries(lst, log_output=not silent)
+            else:
+                llm_weight = max(0.0, min(1.0, float(self.llm_weight.get())))
+                for lst in self.results_by_category_raw.values():
+                    norms = self._normalize_scores(lst)
+                    for r in lst:
+                        base_norm = norms.get(r.get('mid'), r.get('weighted_score', 5.0))
+                        llm_score = r.get('llm_score')
+                        if llm_score is None:
+                            final = base_norm
+                        else:
+                            final = (1.0 - llm_weight) * base_norm + llm_weight * llm_score
+                        r['final_score'] = final
+                        r['score'] = round(final, 3)
+            self._rebuild_filtered_results()
+            current_category = self.leaderboard_var.get()
+            fallback = self.results_by_category_raw.get(current_category, [])
+            self.results = self.results_by_category.get(current_category, fallback)
+            self._update_table()
+        except Exception as e:
+            try:
+                self.log(f"重算权重时出错: {e}")
+            except Exception:
+                pass
+
+    def _close_weight_window(self):
+        if self._weight_win and self._weight_win.winfo_exists():
+            self._weight_win.destroy()
+        self._weight_win = None
+
+    def _save_weight_config(self, entry_vars):
+        new_cfg = copy.deepcopy(DEFAULT_WEIGHT_PRESETS)
+        for preset in DEFAULT_WEIGHT_PRESETS:
+            total_percent = 0.0
+            collected = {}
+            for metric_key, _ in WEIGHT_METRICS:
+                var = entry_vars.get((preset, metric_key))
+                try:
+                    val = max(0.0, float(var.get()))
+                except Exception:
+                    val = 0.0
+                collected[metric_key] = val
+                total_percent += val
+            if total_percent <= 0:
+                total_percent = 1.0
+            for metric_key, val in collected.items():
+                new_cfg[preset][metric_key] = (val / total_percent)
+        self.weight_configs = new_cfg
+        self._close_weight_window()
+        try:
+            self.log("评分权重已更新，已基于新系数即时重算榜单（如需持久化请点击“保存设置”）")
+        except Exception:
+            pass
+        self._refresh_results_with_new_weights(silent=True)
+
+    def open_weight_config(self):
+        if self._weight_win and self._weight_win.winfo_exists():
+            self._weight_win.lift()
+            return
+        win = tk.Toplevel(self.root)
+        win.title("配置评分权重")
+        win.resizable(False, False)
+        self._weight_win = win
+
+        entries = {}
+        for row, preset in enumerate(["normal", "jm", "top1"]):
+            frame = ttk.LabelFrame(win, text=WEIGHT_PRESET_LABELS.get(preset, preset), padding=8)
+            frame.grid(row=row, column=0, sticky="ew", padx=12, pady=6)
+            frame.columnconfigure(1, weight=1)
+            preset_cfg = self.weight_configs.get(preset, DEFAULT_WEIGHT_PRESETS.get(preset, {}))
+            for idx, (metric_key, label) in enumerate(WEIGHT_METRICS):
+                ttk.Label(frame, text=f"{label} (%):").grid(row=idx, column=0, sticky=tk.W, pady=2)
+                var = tk.DoubleVar(value=round(preset_cfg.get(metric_key, 0.0) * 100, 2))
+                entries[(preset, metric_key)] = var
+                ttk.Entry(frame, textvariable=var, width=10).grid(row=idx, column=1, sticky=tk.W, pady=2)
+
+        btn_frame = ttk.Frame(win, padding=8)
+        btn_frame.grid(row=len(WEIGHT_PRESET_LABELS), column=0, sticky="ew")
+        ttk.Button(btn_frame, text="保存", command=lambda: self._save_weight_config(entries)).pack(side=tk.LEFT, padx=4)
+        ttk.Button(btn_frame, text="取消", command=self._close_weight_window).pack(side=tk.LEFT, padx=4)
+        win.protocol("WM_DELETE_WINDOW", self._close_weight_window)
+
     def _scan_worker(self):
             keywords = [k.strip() for k in self.kv.get().split(',') if k.strip()]
             start_ts = None
@@ -512,44 +917,96 @@ class App:
                 mid = owner.get('mid') or owner.get('mid')
                 if not mid:
                     continue
-                entry = by_owner.setdefault(mid, {"name": owner.get('name') or owner.get('uname') or str(mid), "mid": mid, "videos": [], "views_total": 0, "likes_total": 0, "by": {"abyss": {"count": 0, "views": 0, "likes": 0, "videos": []}, "battle": {"count": 0, "views": 0, "likes": 0, "videos": []}, "other": {"count": 0, "views": 0, "likes": 0, "videos": []}}})
+                entry = by_owner.setdefault(
+                    mid,
+                    {
+                        "name": owner.get('name') or owner.get('uname') or str(mid),
+                        "mid": mid,
+                        "videos": [],
+                        "views_total": 0,
+                        "likes_total": 0,
+                        "favorites_total": 0,
+                        "desc_len_total": 0,
+                        "by": {
+                            "abyss": {"count": 0, "views": 0, "likes": 0, "favorites": 0, "desc_len": 0, "videos": []},
+                            "battle": {"count": 0, "views": 0, "likes": 0, "favorites": 0, "desc_len": 0, "videos": []},
+                            "other": {"count": 0, "views": 0, "likes": 0, "favorites": 0, "desc_len": 0, "videos": []},
+                        },
+                    },
+                )
                 stat = it.get('stat') or {}
                 views = int(stat.get('view', 0) or 0)
                 likes = int(stat.get('like', 0) or stat.get('like') or 0)
+                favorites = int(stat.get('favorite') or stat.get('favorites') or stat.get('favorite_count') or stat.get('collect') or 0)
                 title = (it.get('title') or '')
                 kw = (it.get('keyword') or '')
+                desc_text = (it.get('desc') or it.get('description') or "")
+                desc_len = len(desc_text.strip())
                 cat = 'other'
                 if '深渊' in kw or '深渊' in title:
                     cat = 'abyss'
                 elif '记忆战场' in kw or '记忆战场' in title or '战场' in kw or '战场' in title:
                     cat = 'battle'
-                entry['videos'].append({"bvid": it.get('bvid'), 'title': title, 'views': views, 'likes': likes, 'pubdate': it.get('pubdate'), 'cat': cat})
+                entry['videos'].append({
+                    "bvid": it.get('bvid'),
+                    'title': title,
+                    'views': views,
+                    'likes': likes,
+                    'favorites': favorites,
+                    'desc_len': desc_len,
+                    'pubdate': it.get('pubdate'),
+                    'cat': cat,
+                })
                 entry['views_total'] += views
                 entry['likes_total'] += likes
+                entry['favorites_total'] += favorites
+                entry['desc_len_total'] += desc_len
                 entry['by'][cat]['count'] += 1
                 entry['by'][cat]['views'] += views
                 entry['by'][cat]['likes'] += likes
-                entry['by'][cat]['videos'].append({"bvid": it.get('bvid'), 'title': title, 'views': views, 'likes': likes, 'pubdate': it.get('pubdate')})
+                entry['by'][cat]['favorites'] += favorites
+                entry['by'][cat]['desc_len'] += desc_len
+                entry['by'][cat]['videos'].append({"bvid": it.get('bvid'), 'title': title, 'views': views, 'likes': likes, 'favorites': favorites, 'desc_len': desc_len, 'pubdate': it.get('pubdate')})
 
             # scoring: create three leaderboards
             overall = []
             abyss = []
             battle = []
+            def build_entry(mid, name, stats, videos_subset):
+                return {
+                    'mid': mid,
+                    'name': name,
+                    'total_videos': stats.get('count', 0),
+                    'views': stats.get('views', 0),
+                    'likes': stats.get('likes', 0),
+                    'favorites': stats.get('favorites', 0),
+                    'desc_len': stats.get('desc_len', 0),
+                    'videos_list': videos_subset or [],
+                    'score': 0.0,
+                }
+
             for mid, v in by_owner.items():
-                total_videos = len(v['videos'])
-                total_views = v['views_total']
-                total_likes = v['likes_total']
-                overall_score = total_videos * 2.0 + total_views * 0.0001 + total_likes * 0.001
-                abyss_score = v['by']['abyss']['count'] * 2.0 + v['by']['abyss']['views'] * 0.0001 + v['by']['abyss']['likes'] * 0.001
-                battle_score = v['by']['battle']['count'] * 2.0 + v['by']['battle']['views'] * 0.0001 + v['by']['battle']['likes'] * 0.001
-                base = {'mid': mid, 'name': v['name'], 'total_videos': total_videos, 'views': total_views, 'likes': total_likes, 'videos_list': v['videos'], 'by': v['by']}
-                overall.append({**base, 'score': overall_score})
-                abyss.append({**base, 'score': abyss_score})
-                battle.append({**base, 'score': battle_score})
+                overall_stats = {
+                    'count': len(v['videos']),
+                    'views': v['views_total'],
+                    'likes': v['likes_total'],
+                    'favorites': v.get('favorites_total', 0),
+                    'desc_len': v.get('desc_len_total', 0),
+                }
+                abyss_stats = v['by']['abyss']
+                battle_stats = v['by']['battle']
+
+                overall.append(build_entry(mid, v['name'], overall_stats, v['videos']))
+                abyss.append(build_entry(mid, v['name'], abyss_stats, abyss_stats.get('videos') or []))
+                battle.append(build_entry(mid, v['name'], battle_stats, battle_stats.get('videos') or []))
 
             overall.sort(key=lambda x: x['score'], reverse=True)
             abyss.sort(key=lambda x: x['score'], reverse=True)
             battle.sort(key=lambda x: x['score'], reverse=True)
+
+            self._prepare_weighted_metrics(overall)
+            self._prepare_weighted_metrics(abyss)
+            self._prepare_weighted_metrics(battle)
 
             # optional LLM analysis for top N (use configured LLM settings)
             provider = self.provider.get()
@@ -559,23 +1016,9 @@ class App:
             if self.use_llm.get() and provider != 'none':
                 llm = LLMClient(provider=provider, endpoint=api_url, api_key=api_key, model=self.llm_model.get())
 
-            # compute base scores already stored in each list under 'score'
-            def normalize_scores(lst):
-                vals = [x.get('score', 0) for x in lst]
-                if not vals:
-                    return {}
-                mn = min(vals)
-                mx = max(vals)
-                if mx == mn:
-                    return {x['mid']: 5.0 for x in lst}
-                out = {}
-                for x in lst:
-                    out[x['mid']] = ((x.get('score', 0) - mn) / (mx - mn)) * 10.0
-                return out
-
-            overall_norm = normalize_scores(overall)
-            abyss_norm = normalize_scores(abyss)
-            battle_norm = normalize_scores(battle)
+            overall_norm = self._normalize_scores(overall)
+            abyss_norm = self._normalize_scores(abyss)
+            battle_norm = self._normalize_scores(battle)
 
             # combine with LLM if available
             llm_weight = max(0.0, min(1.0, float(self.llm_weight.get())))
@@ -584,79 +1027,7 @@ class App:
                     r['llm_score'] = None
                     r['llm_summary'] = ''
                 if not llm:
-                    # Local weighted rating when LLM is disabled.
-                    # Weights:
-                    # - published video count: 50% (增加寂灭时 +20% => 70%)
-                    # - views: 无寂灭 30% / 有寂灭 20%
-                    # - likes: 无寂灭 20% / 有寂灭 10%
-                    counts_list = [ (x.get('total_videos') or len(x.get('videos_list') or [])) for x in lst ]
-                    views_list = [ (x.get('views') or 0) for x in lst ]
-                    likes_list = [ (x.get('likes') or 0) for x in lst ]
-
-                    def norm_value(val, mn, mx):
-                        try:
-                            v = float(val)
-                        except Exception:
-                            v = 0.0
-                        if mx == mn:
-                            return 5.0
-                        return ((v - mn) / (mx - mn)) * 10.0
-
-                    cmin = min(counts_list) if counts_list else 0
-                    cmax = max(counts_list) if counts_list else 0
-                    vmin = min(views_list) if views_list else 0
-                    vmax = max(views_list) if views_list else 0
-                    lmin = min(likes_list) if likes_list else 0
-                    lmax = max(likes_list) if likes_list else 0
-
-                    def map_label(score):
-                        if score >= 8.5:
-                            return ("夯", 10.0)
-                        if score >= 7.0:
-                            return ("顶级", 8.0)
-                        if score >= 5.5:
-                            return ("人上人", 6.0)
-                        if score >= 3.5:
-                            return (("NPC", 4.0))
-                        return (("拉完了", 2.0))
-
-                    for r in lst:
-                        counts_val = (r.get('total_videos') or len(r.get('videos_list') or []))
-                        views_val = r.get('views') or 0
-                        likes_val = r.get('likes') or 0
-                        counts_n = norm_value(counts_val, cmin, cmax)
-                        views_n = norm_value(views_val, vmin, vmax)
-                        likes_n = norm_value(likes_val, lmin, lmax)
-
-                        # detect presence of 寂灭 in any published title
-                        has_jm = False
-                        for vv in (r.get('videos_list') or []):
-                            try:
-                                t = (vv.get('title') or '')
-                                if '寂灭' in t:
-                                    has_jm = True
-                                    break
-                            except Exception:
-                                continue
-
-                        if has_jm:
-                            w_counts, w_views, w_likes = 0.7, 0.2, 0.1
-                        else:
-                            w_counts, w_views, w_likes = 0.5, 0.3, 0.2
-
-                        composite = counts_n * w_counts + views_n * w_views + likes_n * w_likes
-                        label, val = map_label(composite)
-
-                        r['llm_score'] = val
-                        r['llm_summary'] = (f"本地评级({ '含寂灭' if has_jm else '无寂灭' }): {label} "
-                                            f"(评分={composite:.2f}); counts={counts_val}({counts_n:.2f}), "
-                                            f"views={views_val}({views_n:.2f}), likes={likes_val}({likes_n:.2f})")
-                        try:
-                            self.log(f"本地加权评级 - {r.get('name')} ({r.get('mid')}): {label}, score={composite:.2f}, counts={counts_val}, views={views_val}, likes={likes_val}")
-                        except Exception:
-                            pass
-                        # use composite as final score so sorting follows the weighted rating
-                        r['final_score'] = composite
+                    self._apply_local_summaries(lst)
                     return
 
                 # perform LLM analysis in parallel for top N (configurable via self.llm_threads)
@@ -752,8 +1123,12 @@ class App:
                 for r in lst:
                     r['score'] = round(r.get('final_score', r.get('score', 0)), 3)
 
-            self.results_by_category = {"总榜": overall, "深渊榜": abyss, "战场榜": battle}
-            self.results = self.results_by_category.get(self.leaderboard_var.get(), overall)
+            self._llm_used_last = bool(llm)
+            self.results_by_category_raw = {"总榜": overall, "深渊榜": abyss, "战场榜": battle}
+            self._rebuild_filtered_results()
+            current_category = self.leaderboard_var.get()
+            fallback_lst = self.results_by_category_raw.get(current_category, overall)
+            self.results = self.results_by_category.get(current_category, fallback_lst)
             self.root.after(0, self._update_table)
             self.root.after(0, lambda: self.start_btn.config(state=tk.NORMAL))
             self.root.after(0, lambda: self.export_btn.config(state=tk.NORMAL))
@@ -842,7 +1217,10 @@ class App:
 
     def on_leaderboard_change(self):
         sel = self.leaderboard_var.get()
-        self.results = self.results_by_category.get(sel, self.results)
+        base = self.results_by_category.get(sel)
+        if base is None:
+            base = self.results_by_category_raw.get(sel, self.results)
+        self.results = base or []
         self._update_table()
 
 
