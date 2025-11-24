@@ -1,7 +1,7 @@
 {
   "provider": "openai",
   "api_key": "",
-  "api_url": "https://zhenze-huhehaote.cmecloud.cn/v1",
+  "api_url": "",
   "llm_model": "DeepSeek-V3.1",
   "use_llm": false,
   "bili_cookie": "",
@@ -9,5 +9,6 @@
   "use_proxy": false,
   "use_proxypool": true,
   "llm_weight": 0.4,
-  "llm_threads": 4
+  "llm_threads": 4,
+  "crawl_threads": 3
 }

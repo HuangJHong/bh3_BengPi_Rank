@@ -59,6 +59,9 @@ def set_proxy(proxies: Dict[str, str]):
 PROXY_POOL: List[str] = []
 PROXY_STATS: Dict[str, Dict[str, int]] = {}
 
+# Crawl workers configuration
+CRAWL_WORKERS: int = 5  # default concurrent workers for video detail fetching
+
 
 def set_proxy_pool(proxies: List[str]):
     """Set a list of proxy URLs for rotation (e.g. ['http://ip:port', ...])."""
@@ -69,6 +72,12 @@ def set_proxy_pool(proxies: List[str]):
 
 def get_proxy_pool():
     return list(PROXY_POOL)
+
+
+def set_crawl_workers(workers: int):
+    """Set the number of concurrent workers for video detail fetching."""
+    global CRAWL_WORKERS
+    CRAWL_WORKERS = max(1, min(10, workers))
 
 
 def _choose_proxy() -> Dict[str, str]:
@@ -140,8 +149,9 @@ def _safe_get(url: str, params: dict = None, timeout: int = 10, attempts: int = 
             if proxies:
                 used_proxy = proxies.get('http')
             r = SESSION.get(url, params=params, timeout=timeout, headers=headers, proxies=proxies or None)
-            # quick random delay to reduce request bursts
-            time.sleep(0.2 + random.random() * 0.6)
+            # optimized random delay: reduced from 0.2-0.8s to 0.1-0.4s for better speed
+            # while still maintaining anti-scraping protection
+            time.sleep(0.1 + random.random() * 0.3)
             if r.status_code != 200:
                 LAST_RESP = {"status_code": r.status_code, "text": r.text}
                 # if banned (412) try a few more times with longer backoff and UA rotation
@@ -229,11 +239,11 @@ def collect_by_keyword(keyword: str, pages: int = 2) -> List[Dict[str, Any]]:
     this function uses a ThreadPoolExecutor with a limited number of workers and
     relies on the underlying `_safe_get` jitter/backoff as well.
 
-    max_workers: cap concurrent detail fetches (default 5).
+    max_workers: cap concurrent detail fetches (configurable via set_crawl_workers).
     """
     out = []
-    # tunable worker cap — keep moderate to reduce risk of bans
-    max_workers = 5
+    # use configurable worker cap
+    max_workers = CRAWL_WORKERS
     for p in range(1, pages + 1):
         items = []
         try:

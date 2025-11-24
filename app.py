@@ -12,7 +12,7 @@ import traceback
 import os
 import json
 
-from bilibili import collect_by_keyword, get_last_response
+from bilibili import collect_by_keyword, get_last_response, set_crawl_workers
 from llm_client import LLMClient
 from utils import ts_to_dt
 import bilibili
@@ -109,15 +109,19 @@ class App:
         self.use_proxypool = tk.BooleanVar(value=False)
         tk.Checkbutton(settings_frame, text="使用 proxypool 框架", variable=self.use_proxypool).grid(row=3, column=5, sticky=tk.W, padx=6)
 
-        ttk.Button(settings_frame, text="保存设置", command=self.save_config).grid(row=4, column=1, sticky=tk.W, pady=6)
-        ttk.Button(settings_frame, text="测试 LLM", command=self.test_llm_connection).grid(row=4, column=2, sticky=tk.W, pady=6, padx=4)
-        ttk.Button(settings_frame, text="测试代理", command=self.test_proxies).grid(row=4, column=3, sticky=tk.W, pady=6)
         ttk.Label(settings_frame, text="LLM 权重 (0-1):").grid(row=0, column=4, sticky=tk.W, padx=(10,0))
         self.llm_weight = tk.DoubleVar(value=0.4)
         ttk.Spinbox(settings_frame, from_=0.0, to=1.0, increment=0.1, textvariable=self.llm_weight, width=6).grid(row=0, column=5, sticky=tk.W)
         ttk.Label(settings_frame, text="LLM 并发数:").grid(row=1, column=4, sticky=tk.W, padx=(10,0))
         self.llm_threads = tk.IntVar(value=4)
         ttk.Spinbox(settings_frame, from_=1, to=10, textvariable=self.llm_threads, width=6).grid(row=1, column=5, sticky=tk.W)
+        ttk.Label(settings_frame, text="检索并发数:").grid(row=4, column=0, sticky=tk.W)
+        self.crawl_threads = tk.IntVar(value=3)
+        ttk.Spinbox(settings_frame, from_=1, to=8, textvariable=self.crawl_threads, width=6).grid(row=4, column=1, sticky=tk.W)
+
+        ttk.Button(settings_frame, text="保存设置", command=self.save_config).grid(row=4, column=2, sticky=tk.W, pady=6, padx=4)
+        ttk.Button(settings_frame, text="测试 LLM", command=self.test_llm_connection).grid(row=4, column=3, sticky=tk.W, pady=6, padx=4)
+        ttk.Button(settings_frame, text="测试代理", command=self.test_proxies).grid(row=4, column=4, sticky=tk.W, pady=6)
 
         # --- Actions frame ---
         actions = ttk.Frame(self.main)
@@ -200,6 +204,7 @@ class App:
             "use_proxypool": bool(self.use_proxypool.get()),
             "llm_weight": float(self.llm_weight.get()),
             "llm_threads": int(self.llm_threads.get()),
+            "crawl_threads": int(self.crawl_threads.get()),
         }
         try:
             with open(self.config_path(), "w", encoding="utf-8") as f:
@@ -242,6 +247,10 @@ class App:
                 self.llm_threads.set(int(cfg.get("llm_threads", 4)))
             except Exception:
                 self.llm_threads.set(4)
+            try:
+                self.crawl_threads.set(int(cfg.get("crawl_threads", 3)))
+            except Exception:
+                self.crawl_threads.set(3)
             self.log("已加载配置")
         except Exception as e:
             self.log(f"加载配置失败: {e}")
@@ -330,6 +339,14 @@ class App:
                         self.log("未能从 proxypool API 拉取到代理")
         except Exception as e:
             self.log(f"设置代理池失败: {e}")
+        
+        # apply crawl workers setting
+        try:
+            crawl_workers = max(1, min(8, int(self.crawl_threads.get())))
+            set_crawl_workers(crawl_workers)
+            self.log(f"已设置检索并发数为 {crawl_workers}")
+        except Exception as e:
+            self.log(f"设置检索并发数失败: {e}")
 
         t = threading.Thread(target=self._scan_worker, daemon=True)
         t.start()
@@ -423,45 +440,70 @@ class App:
             collected = []
             total = max(1, len(keywords) * pages)
             cnt = 0
+            
+            # 使用线程池并发处理关键词检索
+            crawl_workers = max(1, min(8, int(self.crawl_threads.get())))
+            
+            def fetch_keyword_page(kw, p):
+                """获取单个关键词的单个页面"""
+                if self._stop_event.is_set():
+                    return []
+                try:
+                    items = collect_by_keyword(kw, pages=1)
+                    self.log(f"已检索关键词 '{kw}' 第 {p} 页，返回 {len(items)} 条结果")
+                    if not items:
+                        try:
+                            last = get_last_response()
+                            if isinstance(last, dict) and last.get('status_code') == 412:
+                                self.log("检测到 B站 安全拦截 (412)，当前 IP/请求被封。建议：使用有效的 B站 Cookie、代理或通过浏览器登录并抓取。")
+                                self.log("已停止采集以避免进一步封禁。若要继续，请配置 Cookie 或代理后重新开始。")
+                                self._stop_event.set()
+                                return []
+                        except Exception:
+                            pass
+                    return items
+                except Exception as e:
+                    self.log(f"关键词 '{kw}' 第 {p} 页检索出错: {e}")
+                    return []
+            
+            # 创建所有任务
+            tasks = []
             for kw in keywords:
                 for p in range(1, pages + 1):
+                    tasks.append((kw, p))
+            
+            # 使用线程池并发执行
+            collected_lock = threading.Lock()
+            with concurrent.futures.ThreadPoolExecutor(max_workers=crawl_workers) as executor:
+                future_to_task = {executor.submit(fetch_keyword_page, kw, p): (kw, p) for kw, p in tasks}
+                for future in concurrent.futures.as_completed(future_to_task):
                     if self._stop_event.is_set():
-                        self.log("检测到停止信号，已中止采集循环")
                         break
+                    kw, p = future_to_task[future]
                     try:
-                        items = collect_by_keyword(kw, pages=1)
-                        self.log(f"已检索关键词 '{kw}' 第 {p} 页，返回 {len(items)} 条结果")
-                        if not items:
+                        items = future.result()
+                        with collected_lock:
+                            for it in items:
+                                pub = it.get('pubdate')
+                                if pub and start_ts and end_ts:
+                                    try:
+                                        if not (start_ts <= int(pub) <= end_ts):
+                                            continue
+                                    except Exception:
+                                        pass
+                                collected.append(it)
+                            cnt += 1
                             try:
-                                last = get_last_response()
-                                self.log(f"B站响应调试信息: {last}")
-                                if isinstance(last, dict) and last.get('status_code') == 412:
-                                    self.log("检测到 B站 安全拦截 (412)，当前 IP/请求被封。建议：使用有效的 B站 Cookie、代理或通过浏览器登录并抓取。")
-                                    self.log("已停止采集以避免进一步封禁。若要继续，请配置 Cookie 或代理后重新开始。")
-                                    self._stop_event.set()
-                                    break
+                                self.root.after(0, lambda v=(cnt / total) * 100: self.progress.configure(value=v))
                             except Exception:
                                 pass
                     except Exception as e:
-                        items = []
-                        self.log(f"关键词 '{kw}' 第 {p} 页检索出错: {e}")
-                        self.log(traceback.format_exc())
-                    for it in items:
-                        pub = it.get('pubdate')
-                        if pub and start_ts and end_ts:
-                            try:
-                                if not (start_ts <= int(pub) <= end_ts):
-                                    continue
-                            except Exception:
-                                pass
-                        collected.append(it)
-                    cnt += 1
-                    try:
-                        self.root.after(0, lambda v=(cnt / total) * 100: self.progress.configure(value=v))
-                    except Exception:
-                        pass
-                if self._stop_event.is_set():
-                    break
+                        self.log(f"处理关键词 '{kw}' 第 {p} 页结果时出错: {e}")
+                        cnt += 1
+                        try:
+                            self.root.after(0, lambda v=(cnt / total) * 100: self.progress.configure(value=v))
+                        except Exception:
+                            pass
 
             # aggregate by owner with per-category stats
             by_owner = {}
