@@ -14,7 +14,7 @@ import json
 import statistics
 import copy
 
-from bilibili import collect_by_keyword, get_last_response, set_crawl_workers
+from bilibili import collect_by_keyword, get_last_response, set_crawl_workers, set_search_order
 from llm_client import LLMClient
 from utils import ts_to_dt
 import bilibili
@@ -31,6 +31,11 @@ DEFAULT_KEYWORDS = [
     "崩坏3 红莲",
     "崩坏3 乐土",
 ]
+
+SEARCH_ORDER_LABELS = {
+    "time": "按时间倒序",
+    "default": "默认排序",
+}
 
 WEIGHT_METRICS = [
     ("counts", "视频数量"),
@@ -140,6 +145,12 @@ class App:
         ttk.Label(settings_frame, text="检索并发数:").grid(row=4, column=0, sticky=tk.W)
         self.crawl_threads = tk.IntVar(value=3)
         ttk.Spinbox(settings_frame, from_=1, to=8, textvariable=self.crawl_threads, width=6).grid(row=4, column=1, sticky=tk.W)
+        ttk.Label(settings_frame, text="检索排序:").grid(row=5, column=0, sticky=tk.W, pady=(4,0))
+        order_values = list(SEARCH_ORDER_LABELS.values())
+        self.search_order_mode = tk.StringVar(value=SEARCH_ORDER_LABELS["time"])
+        self.search_order_cb = ttk.Combobox(settings_frame, values=order_values, textvariable=self.search_order_mode, state='readonly', width=12)
+        self.search_order_cb.grid(row=5, column=1, sticky=tk.W, pady=(4,0))
+        self.search_order_cb.bind("<<ComboboxSelected>>", lambda e: None)
 
         ttk.Button(settings_frame, text="保存设置", command=self.save_config).grid(row=4, column=2, sticky=tk.W, pady=6, padx=4)
         ttk.Button(settings_frame, text="测试 LLM", command=self.test_llm_connection).grid(row=4, column=3, sticky=tk.W, pady=6, padx=4)
@@ -247,6 +258,7 @@ class App:
             "weight_configs": self.weight_configs,
             "outlier_sigma": float(self.outlier_sigma.get()),
             "blacklist": sorted(self.banned_upnames),
+            "search_order": self._get_search_order_key(),
         }
         try:
             with open(self.config_path(), "w", encoding="utf-8") as f:
@@ -308,6 +320,10 @@ class App:
                     self.banned_upnames = {str(x).strip() for x in bl if str(x).strip()}
             except Exception:
                 self.banned_upnames = set()
+            try:
+                self._set_search_order_from_key(cfg.get("search_order", "time"))
+            except Exception:
+                self._set_search_order_from_key("time")
             self.log("已加载配置")
         except Exception as e:
             self.log(f"加载配置失败: {e}")
@@ -404,6 +420,13 @@ class App:
             self.log(f"已设置检索并发数为 {crawl_workers}")
         except Exception as e:
             self.log(f"设置检索并发数失败: {e}")
+
+        try:
+            order_key = self._get_search_order_key()
+            set_search_order("pubdate" if order_key == "time" else "default")
+            self.log(f"检索排序: {'按时间倒序' if order_key == 'time' else '默认'}")
+        except Exception as e:
+            self.log(f"设置检索排序失败: {e}")
 
         t = threading.Thread(target=self._scan_worker, daemon=True)
         t.start()
@@ -542,6 +565,17 @@ class App:
         if mx == mn:
             return 5.0
         return ((v - mn) / (mx - mn)) * 10.0
+
+    def _get_search_order_key(self):
+        label = (self.search_order_mode.get() or "").strip()
+        for key, text in SEARCH_ORDER_LABELS.items():
+            if label == text:
+                return key
+        return "time"
+
+    def _set_search_order_from_key(self, key: str):
+        label = SEARCH_ORDER_LABELS.get(key, SEARCH_ORDER_LABELS["time"])
+        self.search_order_mode.set(label)
 
     def _prepare_weighted_metrics(self, lst):
         if not lst:

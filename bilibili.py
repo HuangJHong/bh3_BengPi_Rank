@@ -13,6 +13,8 @@ from urllib3.util.retry import Retry
 SEARCH_URL = "https://api.bilibili.com/x/web-interface/search/type"
 VIEW_URL = "https://api.bilibili.com/x/web-interface/view"
 
+SEARCH_ORDER_MODE = "pubdate"
+
 # use a session with common browser headers to reduce 412/403 risk
 SESSION = requests.Session()
 
@@ -68,6 +70,15 @@ def set_proxy_pool(proxies: List[str]):
     global PROXY_POOL, PROXY_STATS
     PROXY_POOL = [p.strip() for p in proxies if p and p.strip()]
     PROXY_STATS = {p: {"fails": 0, "success": 0} for p in PROXY_POOL}
+
+
+def set_search_order(mode: str):
+    """Set search ordering strategy."""
+    global SEARCH_ORDER_MODE
+    if isinstance(mode, str) and mode.lower() == "pubdate":
+        SEARCH_ORDER_MODE = "pubdate"
+    else:
+        SEARCH_ORDER_MODE = "default"
 
 
 def get_proxy_pool():
@@ -190,13 +201,16 @@ def _safe_get(url: str, params: dict = None, timeout: int = 10, attempts: int = 
     raise last_exc
 
 
-def search_videos(keyword: str, page: int = 1) -> List[Dict[str, Any]]:
+def search_videos(keyword: str, page: int = 1, order: str = None) -> List[Dict[str, Any]]:
     # Try a few common parameter variants as B 站 search endpoints differ
     param_variants = [
         {"search_type": "video", "keyword": keyword, "page": page},
         {"search_type": "video", "keyword": keyword, "pn": page, "ps": 20},
         {"search_type": "video", "keyword": keyword, "page": page, "ps": 20},
     ]
+    if order and order != "default":
+        for params in param_variants:
+            params["order"] = order
     for params in param_variants:
         try:
             j = _safe_get(SEARCH_URL, params=params, timeout=8, attempts=3)
@@ -247,7 +261,8 @@ def collect_by_keyword(keyword: str, pages: int = 2) -> List[Dict[str, Any]]:
     for p in range(1, pages + 1):
         items = []
         try:
-            items = search_videos(keyword, page=p)
+            mode = SEARCH_ORDER_MODE if SEARCH_ORDER_MODE != "default" else None
+            items = search_videos(keyword, page=p, order=mode)
         except Exception:
             items = []
 
