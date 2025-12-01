@@ -201,13 +201,26 @@ def _safe_get(url: str, params: dict = None, timeout: int = 10, attempts: int = 
     raise last_exc
 
 
-def search_videos(keyword: str, page: int = 1, order: str = None) -> List[Dict[str, Any]]:
+def search_videos(keyword: str, page: int = 1, order: str = None, up_mid: int = None) -> List[Dict[str, Any]]:
     # Try a few common parameter variants as B 站 search endpoints differ
+    # If up_mid is provided, combine keyword with up主 filter
+    search_keyword = keyword
+    if up_mid:
+        # B站搜索支持 "关键词 up主:mid" 格式
+        search_keyword = f"{keyword} up主:{up_mid}"
+    
     param_variants = [
-        {"search_type": "video", "keyword": keyword, "page": page},
-        {"search_type": "video", "keyword": keyword, "pn": page, "ps": 20},
-        {"search_type": "video", "keyword": keyword, "page": page, "ps": 20},
+        {"search_type": "video", "keyword": search_keyword, "page": page},
+        {"search_type": "video", "keyword": search_keyword, "pn": page, "ps": 20},
+        {"search_type": "video", "keyword": search_keyword, "page": page, "ps": 20},
     ]
+    # Also try with mid parameter if provided
+    if up_mid:
+        param_variants.extend([
+            {"search_type": "video", "keyword": keyword, "mid": up_mid, "page": page},
+            {"search_type": "video", "keyword": keyword, "mid": up_mid, "pn": page, "ps": 20},
+        ])
+    
     if order and order != "default":
         for params in param_variants:
             params["order"] = order
@@ -246,12 +259,108 @@ def get_video_detail(bvid: str) -> Dict[str, Any]:
     return j.get("data", {})
 
 
-def collect_by_keyword(keyword: str, pages: int = 2) -> List[Dict[str, Any]]:
+def collect_all_videos_by_up(up_mid: int, max_pages: int = 100) -> List[Dict[str, Any]]:
+    """获取指定UP主的所有视频（不限制关键词，遍历所有页面直到没有结果）
+    
+    Args:
+        up_mid: UP主的mid
+        max_pages: 最大页数限制，防止无限循环
+    
+    Returns:
+        该UP主的所有视频列表
+    """
+    out = []
+    max_workers = CRAWL_WORKERS
+    seen_bvids = set()  # 用于去重
+    
+    # 通过搜索"up主:mid"格式来获取该UP主的视频
+    # 使用一个通用关键词来触发搜索，然后通过up_mid参数过滤
+    page = 1
+    while page <= max_pages:
+        items = []
+        try:
+            # 尝试不同的搜索方式
+            mode = SEARCH_ORDER_MODE if SEARCH_ORDER_MODE != "default" else None
+            # 方式1: 使用空关键词 + up_mid参数
+            items = search_videos("", page=page, order=mode, up_mid=up_mid)
+            # 方式2: 如果方式1不行，尝试使用通用关键词
+            if not items:
+                items = search_videos("视频", page=page, order=mode, up_mid=up_mid)
+            # 方式3: 如果还不行，尝试搜索"up主:mid"格式
+            if not items:
+                items = search_videos(f"up主:{up_mid}", page=page, order=mode)
+        except Exception:
+            items = []
+        
+        if not items:
+            # 没有更多结果，停止
+            break
+        
+        # map bvid -> original item so we can merge detail responses
+        bvid_map = {}
+        bvids = []
+        for it in items:
+            bvid = it.get("bvid") or it.get("bvid")
+            if not bvid or bvid in seen_bvids:
+                continue
+            bvids.append(bvid)
+            bvid_map[bvid] = it
+            seen_bvids.add(bvid)
+        
+        if not bvids:
+            # 这一页都是重复的，可能已经获取完所有视频
+            break
+        
+        # fetch details concurrently but limit parallelism
+        details_map: Dict[str, Dict[str, Any]] = {}
+        if bvids:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=min(max_workers, len(bvids))) as ex:
+                future_to_bvid = {ex.submit(get_video_detail, b): b for b in bvids}
+                for fut in concurrent.futures.as_completed(future_to_bvid):
+                    b = future_to_bvid[fut]
+                    try:
+                        details_map[b] = fut.result()
+                    except Exception:
+                        details_map[b] = {}
+        
+        for bvid in bvids:
+            it = bvid_map.get(bvid, {})
+            detail = details_map.get(bvid, {}) or {}
+            # 验证视频确实属于该UP主
+            owner = detail.get("owner") or it.get("owner") or {}
+            owner_mid = owner.get("mid")
+            if owner_mid and str(owner_mid) != str(up_mid):
+                # 视频不属于该UP主，跳过
+                continue
+            
+            entry = {
+                "keyword": "",  # 空关键词，表示获取所有视频
+                "bvid": bvid,
+                "title": it.get("title"),
+                "desc": it.get("description") or detail.get("desc"),
+                "pubdate": detail.get("pubdate") or it.get("pubdate"),
+                "owner": detail.get("owner") or it.get("owner"),
+                "stat": detail.get("stat") or it.get("stat"),
+                "arc": detail,
+            }
+            out.append(entry)
+        
+        page += 1
+    
+    return out
+
+
+def collect_by_keyword(keyword: str, pages: int = 2, up_mid: int = None) -> List[Dict[str, Any]]:
     """Collect search results for a keyword and fetch video details in parallel.
 
     To avoid creating too many concurrent requests (which may trigger anti-scraping),
     this function uses a ThreadPoolExecutor with a limited number of workers and
     relies on the underlying `_safe_get` jitter/backoff as well.
+
+    Args:
+        keyword: Search keyword
+        pages: Number of pages to fetch
+        up_mid: Optional UP主 mid to filter results by specific UP主
 
     max_workers: cap concurrent detail fetches (configurable via set_crawl_workers).
     """
@@ -262,7 +371,7 @@ def collect_by_keyword(keyword: str, pages: int = 2) -> List[Dict[str, Any]]:
         items = []
         try:
             mode = SEARCH_ORDER_MODE if SEARCH_ORDER_MODE != "default" else None
-            items = search_videos(keyword, page=p, order=mode)
+            items = search_videos(keyword, page=p, order=mode, up_mid=up_mid)
         except Exception:
             items = []
 

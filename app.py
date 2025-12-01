@@ -14,7 +14,7 @@ import json
 import statistics
 import copy
 
-from bilibili import collect_by_keyword, get_last_response, set_crawl_workers, set_search_order
+from bilibili import collect_by_keyword, collect_all_videos_by_up, get_last_response, set_crawl_workers, set_search_order
 from llm_client import LLMClient
 from utils import ts_to_dt
 import bilibili
@@ -99,6 +99,13 @@ class App:
         self.leaderboard_cb = ttk.Combobox(filter_frame, values=["总榜", "深渊榜", "战场榜"], textvariable=self.leaderboard_var, width=12, state='readonly')
         self.leaderboard_cb.grid(row=0, column=5, sticky=tk.W)
         self.leaderboard_cb.bind("<<ComboboxSelected>>", lambda e: self.on_leaderboard_change())
+
+        ttk.Label(filter_frame, text="搜索模式:").grid(row=2, column=0, sticky=tk.W, pady=(4,0))
+        self.search_mode_var = tk.StringVar(value="keyword")
+        search_mode_frame = ttk.Frame(filter_frame)
+        search_mode_frame.grid(row=2, column=1, columnspan=5, sticky=tk.W, pady=(4,0))
+        ttk.Radiobutton(search_mode_frame, text="模式1: 按关键词搜索", variable=self.search_mode_var, value="keyword").pack(side=tk.LEFT, padx=(0,10))
+        ttk.Radiobutton(search_mode_frame, text="模式2: 先找UP主再按关键词搜索", variable=self.search_mode_var, value="up_first").pack(side=tk.LEFT)
 
         # --- Settings frame (LLM, cookie, proxy) ---
         settings_frame = ttk.LabelFrame(self.main, text="设置", padding=8)
@@ -259,6 +266,7 @@ class App:
             "outlier_sigma": float(self.outlier_sigma.get()),
             "blacklist": sorted(self.banned_upnames),
             "search_order": self._get_search_order_key(),
+            "search_mode": self.search_mode_var.get(),
         }
         try:
             with open(self.config_path(), "w", encoding="utf-8") as f:
@@ -324,6 +332,10 @@ class App:
                 self._set_search_order_from_key(cfg.get("search_order", "time"))
             except Exception:
                 self._set_search_order_from_key("time")
+            try:
+                self.search_mode_var.set(cfg.get("search_mode", "keyword"))
+            except Exception:
+                self.search_mode_var.set("keyword")
             self.log("已加载配置")
         except Exception as e:
             self.log(f"加载配置失败: {e}")
@@ -974,309 +986,484 @@ class App:
         self._refresh_results_with_new_weights(silent=not update_ui, update_ui=update_ui)
 
     def _scan_worker(self):
-            keywords = [k.strip() for k in self.kv.get().split(',') if k.strip()]
-            start_ts = None
-            end_ts = None
-            try:
-                start_ts = int(datetime.fromisoformat(self.start.get()).timestamp())
-                end_ts = int(datetime.fromisoformat(self.end.get()).timestamp())
-            except Exception:
-                pass
+        search_mode = self.search_mode_var.get()
+        if search_mode == "up_first":
+            self._scan_worker_mode2()
+        else:
+            self._scan_worker_mode1()
 
-            pages = int(self.pages.get())
-            collected = []
-            total = max(1, len(keywords) * pages)
-            cnt = 0
-            
-            # 使用线程池并发处理关键词检索
-            crawl_workers = max(1, min(8, int(self.crawl_threads.get())))
-            
-            def fetch_keyword_page(kw, p):
-                """获取单个关键词的单个页面"""
-                if self._stop_event.is_set():
-                    return []
-                try:
-                    items = collect_by_keyword(kw, pages=1)
-                    self.log(f"已检索关键词 '{kw}' 第 {p} 页，返回 {len(items)} 条结果")
-                    if not items:
-                        try:
-                            last = get_last_response()
-                            if isinstance(last, dict) and last.get('status_code') == 412:
-                                self.log("检测到 B站 安全拦截 (412)，当前 IP/请求被封。建议：使用有效的 B站 Cookie、代理或通过浏览器登录并抓取。")
-                                self.log("已停止采集以避免进一步封禁。若要继续，请配置 Cookie 或代理后重新开始。")
-                                self._stop_event.set()
-                                return []
-                        except Exception:
-                            pass
-                    return items
-                except Exception as e:
-                    self.log(f"关键词 '{kw}' 第 {p} 页检索出错: {e}")
-                    return []
-            
-            # 创建所有任务
-            tasks = []
-            for kw in keywords:
-                for p in range(1, pages + 1):
-                    tasks.append((kw, p))
-            
-            # 使用线程池并发执行
-            collected_lock = threading.Lock()
-            with concurrent.futures.ThreadPoolExecutor(max_workers=crawl_workers) as executor:
-                future_to_task = {executor.submit(fetch_keyword_page, kw, p): (kw, p) for kw, p in tasks}
-                for future in concurrent.futures.as_completed(future_to_task):
-                    if self._stop_event.is_set():
-                        break
-                    kw, p = future_to_task[future]
+    def _scan_worker_mode1(self):
+        """模式1: 按关键词搜索"""
+        keywords = [k.strip() for k in self.kv.get().split(',') if k.strip()]
+        start_ts = None
+        end_ts = None
+        try:
+            start_ts = int(datetime.fromisoformat(self.start.get()).timestamp())
+            end_ts = int(datetime.fromisoformat(self.end.get()).timestamp())
+        except Exception:
+            pass
+
+        pages = int(self.pages.get())
+        collected = []
+        total = max(1, len(keywords) * pages)
+        cnt = 0
+        
+        # 使用线程池并发处理关键词检索
+        crawl_workers = max(1, min(8, int(self.crawl_threads.get())))
+        
+        def fetch_keyword_page(kw, p):
+            """获取单个关键词的单个页面"""
+            if self._stop_event.is_set():
+                return []
+            try:
+                items = collect_by_keyword(kw, pages=1)
+                self.log(f"已检索关键词 '{kw}' 第 {p} 页，返回 {len(items)} 条结果")
+                if not items:
                     try:
-                        items = future.result()
-                        with collected_lock:
-                            for it in items:
-                                pub = it.get('pubdate')
-                                if pub and start_ts and end_ts:
-                                    try:
-                                        if not (start_ts <= int(pub) <= end_ts):
-                                            continue
-                                    except Exception:
-                                        pass
-                                collected.append(it)
-                            cnt += 1
-                            try:
-                                self.root.after(0, lambda v=(cnt / total) * 100: self.progress.configure(value=v))
-                            except Exception:
-                                pass
-                    except Exception as e:
-                        self.log(f"处理关键词 '{kw}' 第 {p} 页结果时出错: {e}")
+                        last = get_last_response()
+                        if isinstance(last, dict) and last.get('status_code') == 412:
+                            self.log("检测到 B站 安全拦截 (412)，当前 IP/请求被封。建议：使用有效的 B站 Cookie、代理或通过浏览器登录并抓取。")
+                            self.log("已停止采集以避免进一步封禁。若要继续，请配置 Cookie 或代理后重新开始。")
+                            self._stop_event.set()
+                            return []
+                    except Exception:
+                        pass
+                return items
+            except Exception as e:
+                self.log(f"关键词 '{kw}' 第 {p} 页检索出错: {e}")
+                return []
+        
+        # 创建所有任务
+        tasks = []
+        for kw in keywords:
+            for p in range(1, pages + 1):
+                tasks.append((kw, p))
+        
+        # 使用线程池并发执行
+        collected_lock = threading.Lock()
+        with concurrent.futures.ThreadPoolExecutor(max_workers=crawl_workers) as executor:
+            future_to_task = {executor.submit(fetch_keyword_page, kw, p): (kw, p) for kw, p in tasks}
+            for future in concurrent.futures.as_completed(future_to_task):
+                if self._stop_event.is_set():
+                    break
+                kw, p = future_to_task[future]
+                try:
+                    items = future.result()
+                    with collected_lock:
+                        for it in items:
+                            pub = it.get('pubdate')
+                            if pub and start_ts and end_ts:
+                                try:
+                                    if not (start_ts <= int(pub) <= end_ts):
+                                        continue
+                                except Exception:
+                                    pass
+                            collected.append(it)
                         cnt += 1
                         try:
                             self.root.after(0, lambda v=(cnt / total) * 100: self.progress.configure(value=v))
                         except Exception:
                             pass
-
-            # aggregate by owner with per-category stats
-            by_owner = {}
-            for it in collected:
-                owner = it.get('owner') or {}
-                mid = owner.get('mid') or owner.get('mid')
-                if not mid:
-                    continue
-                entry = by_owner.setdefault(
-                    mid,
-                    {
-                        "name": owner.get('name') or owner.get('uname') or str(mid),
-                        "mid": mid,
-                        "videos": [],
-                        "views_total": 0,
-                        "likes_total": 0,
-                        "favorites_total": 0,
-                        "desc_len_total": 0,
-                        "by": {
-                            "abyss": {"count": 0, "views": 0, "likes": 0, "favorites": 0, "desc_len": 0, "videos": []},
-                            "battle": {"count": 0, "views": 0, "likes": 0, "favorites": 0, "desc_len": 0, "videos": []},
-                            "other": {"count": 0, "views": 0, "likes": 0, "favorites": 0, "desc_len": 0, "videos": []},
-                        },
-                    },
-                )
-                stat = it.get('stat') or {}
-                views = int(stat.get('view', 0) or 0)
-                likes = int(stat.get('like', 0) or stat.get('like') or 0)
-                favorites = int(stat.get('favorite') or stat.get('favorites') or stat.get('favorite_count') or stat.get('collect') or 0)
-                title = (it.get('title') or '')
-                kw = (it.get('keyword') or '')
-                desc_text = (it.get('desc') or it.get('description') or "")
-                desc_len = len(desc_text.strip())
-                cat = 'other'
-                if '深渊' in kw or '深渊' in title:
-                    cat = 'abyss'
-                elif '记忆战场' in kw or '记忆战场' in title or '战场' in kw or '战场' in title:
-                    cat = 'battle'
-                entry['videos'].append({
-                    "bvid": it.get('bvid'),
-                    'title': title,
-                    'views': views,
-                    'likes': likes,
-                    'favorites': favorites,
-                    'desc_len': desc_len,
-                    'pubdate': it.get('pubdate'),
-                    'cat': cat,
-                })
-                entry['views_total'] += views
-                entry['likes_total'] += likes
-                entry['favorites_total'] += favorites
-                entry['desc_len_total'] += desc_len
-                entry['by'][cat]['count'] += 1
-                entry['by'][cat]['views'] += views
-                entry['by'][cat]['likes'] += likes
-                entry['by'][cat]['favorites'] += favorites
-                entry['by'][cat]['desc_len'] += desc_len
-                entry['by'][cat]['videos'].append({"bvid": it.get('bvid'), 'title': title, 'views': views, 'likes': likes, 'favorites': favorites, 'desc_len': desc_len, 'pubdate': it.get('pubdate')})
-
-            # scoring: create three leaderboards
-            overall = []
-            abyss = []
-            battle = []
-            def build_entry(mid, name, stats, videos_subset):
-                return {
-                    'mid': mid,
-                    'name': name,
-                    'total_videos': stats.get('count', 0),
-                    'views': stats.get('views', 0),
-                    'likes': stats.get('likes', 0),
-                    'favorites': stats.get('favorites', 0),
-                    'desc_len': stats.get('desc_len', 0),
-                    'videos_list': videos_subset or [],
-                    'score': 0.0,
-                }
-
-            for mid, v in by_owner.items():
-                overall_stats = {
-                    'count': len(v['videos']),
-                    'views': v['views_total'],
-                    'likes': v['likes_total'],
-                    'favorites': v.get('favorites_total', 0),
-                    'desc_len': v.get('desc_len_total', 0),
-                }
-                abyss_stats = v['by']['abyss']
-                battle_stats = v['by']['battle']
-
-                overall.append(build_entry(mid, v['name'], overall_stats, v['videos']))
-                abyss.append(build_entry(mid, v['name'], abyss_stats, abyss_stats.get('videos') or []))
-                battle.append(build_entry(mid, v['name'], battle_stats, battle_stats.get('videos') or []))
-
-            overall.sort(key=lambda x: x['score'], reverse=True)
-            abyss.sort(key=lambda x: x['score'], reverse=True)
-            battle.sort(key=lambda x: x['score'], reverse=True)
-
-            self._prepare_weighted_metrics(overall)
-            self._prepare_weighted_metrics(abyss)
-            self._prepare_weighted_metrics(battle)
-
-            # optional LLM analysis for top N (use configured LLM settings)
-            provider = self.provider.get()
-            api_key = self.api_key.get().strip()
-            api_url = self.api_url.get().strip() or None
-            llm = None
-            if self.use_llm.get() and provider != 'none':
-                llm = LLMClient(provider=provider, endpoint=api_url, api_key=api_key, model=self.llm_model.get())
-
-            overall_norm = self._normalize_scores(overall)
-            abyss_norm = self._normalize_scores(abyss)
-            battle_norm = self._normalize_scores(battle)
-
-            # combine with LLM if available
-            llm_weight = max(0.0, min(1.0, float(self.llm_weight.get())))
-            def enrich_with_llm_and_combine(lst, lst_norm):
-                for r in lst[:50]:
-                    r['llm_score'] = None
-                    r['llm_summary'] = ''
-                if not llm:
-                    self._apply_local_summaries(lst)
-                    return
-
-                # perform LLM analysis in parallel for top N (configurable via self.llm_threads)
-                top_n = min(50, len(lst))
-                tops = lst[:top_n]
-
-                def _call_llm_safe(uinfo, rref):
+                except Exception as e:
+                    self.log(f"处理关键词 '{kw}' 第 {p} 页结果时出错: {e}")
+                    cnt += 1
                     try:
-                        return llm.analyze_uploader(uinfo, top_videos=rref.get('videos_list')[:3])
-                    except Exception as e:
+                        self.root.after(0, lambda v=(cnt / total) * 100: self.progress.configure(value=v))
+                    except Exception:
+                        pass
+        
+        self._process_collected_results(collected, start_ts, end_ts)
+
+    def _scan_worker_mode2(self):
+        """模式2: 先搜索崩坏3获取所有UP主，再按关键词搜索每个UP主的视频"""
+        keywords = [k.strip() for k in self.kv.get().split(',') if k.strip()]
+        start_ts = None
+        end_ts = None
+        try:
+            start_ts = int(datetime.fromisoformat(self.start.get()).timestamp())
+            end_ts = int(datetime.fromisoformat(self.end.get()).timestamp())
+        except Exception:
+            pass
+
+        pages = int(self.pages.get())
+        collected = []
+        
+        # 第一步：搜索"崩坏3"获取所有相关UP主
+        self.log("模式2: 开始搜索'崩坏3'以获取所有相关UP主...")
+        up_mids = set()
+        crawl_workers = max(1, min(8, int(self.crawl_threads.get())))
+        
+        # 搜索"崩坏3"获取UP主列表
+        def fetch_bh3_page(p):
+            """获取崩坏3搜索结果的单个页面"""
+            if self._stop_event.is_set():
+                return []
+            try:
+                items = collect_by_keyword("崩坏3", pages=1)
+                self.log(f"已检索'崩坏3' 第 {p} 页，返回 {len(items)} 条结果")
+                if not items:
+                    try:
+                        last = get_last_response()
+                        if isinstance(last, dict) and last.get('status_code') == 412:
+                            self.log("检测到 B站 安全拦截 (412)，当前 IP/请求被封。建议：使用有效的 B站 Cookie、代理或通过浏览器登录并抓取。")
+                            self.log("已停止采集以避免进一步封禁。若要继续，请配置 Cookie 或代理后重新开始。")
+                            self._stop_event.set()
+                            return []
+                    except Exception:
+                        pass
+                return items
+            except Exception as e:
+                self.log(f"'崩坏3' 第 {p} 页检索出错: {e}")
+                return []
+        
+        # 获取所有UP主
+        bh3_items = []
+        with concurrent.futures.ThreadPoolExecutor(max_workers=crawl_workers) as executor:
+            futures = [executor.submit(fetch_bh3_page, p) for p in range(1, pages + 1)]
+            for future in concurrent.futures.as_completed(futures):
+                if self._stop_event.is_set():
+                    break
+                try:
+                    items = future.result()
+                    bh3_items.extend(items)
+                except Exception as e:
+                    self.log(f"处理'崩坏3'搜索结果时出错: {e}")
+        
+        # 从搜索结果中提取所有UP主的mid
+        for it in bh3_items:
+            owner = it.get('owner') or {}
+            mid = owner.get('mid')
+            if mid:
+                up_mids.add(mid)
+        
+        self.log(f"模式2: 从'崩坏3'搜索结果中提取到 {len(up_mids)} 个UP主")
+        
+        if not up_mids:
+            self.log("模式2: 未找到任何UP主，停止采集")
+            self.root.after(0, lambda: self.start_btn.config(state=tk.NORMAL))
+            self.root.after(0, lambda: self.export_btn.config(state=tk.DISABLED))
+            self.root.after(0, lambda: self.stop_btn.config(state=tk.DISABLED))
+            return
+        
+        # 第二步：对每个UP主，获取其所有视频，然后根据关键词过滤统计
+        self.log(f"模式2: 开始获取 {len(up_mids)} 个UP主的所有视频，然后根据关键词过滤统计...")
+        total_tasks = len(up_mids)
+        cnt = 0
+        
+        def fetch_all_up_videos(up_mid):
+            """获取指定UP主的所有视频"""
+            if self._stop_event.is_set():
+                return []
+            try:
+                owner_name = "未知"
+                all_videos = collect_all_videos_by_up(up_mid)
+                if all_videos:
+                    owner = all_videos[0].get('owner') or {}
+                    owner_name = owner.get('name') or owner.get('uname') or str(up_mid)
+                self.log(f"已获取UP主 '{owner_name}' (mid:{up_mid}) 的所有视频，共 {len(all_videos)} 条")
+                if not all_videos:
+                    try:
+                        last = get_last_response()
+                        if isinstance(last, dict) and last.get('status_code') == 412:
+                            self.log("检测到 B站 安全拦截 (412)，当前 IP/请求被封。建议：使用有效的 B站 Cookie、代理或通过浏览器登录并抓取。")
+                            self.log("已停止采集以避免进一步封禁。若要继续，请配置 Cookie 或代理后重新开始。")
+                            self._stop_event.set()
+                            return []
+                    except Exception:
+                        pass
+                return all_videos
+            except Exception as e:
+                self.log(f"获取UP主 {up_mid} 的所有视频时出错: {e}")
+                return []
+        
+        # 使用线程池并发获取所有UP主的视频
+        up_videos_map = {}  # up_mid -> list of videos
+        collected_lock = threading.Lock()
+        with concurrent.futures.ThreadPoolExecutor(max_workers=crawl_workers) as executor:
+            future_to_mid = {executor.submit(fetch_all_up_videos, up_mid): up_mid for up_mid in up_mids}
+            for future in concurrent.futures.as_completed(future_to_mid):
+                if self._stop_event.is_set():
+                    break
+                up_mid = future_to_mid[future]
+                try:
+                    videos = future.result()
+                    with collected_lock:
+                        up_videos_map[up_mid] = videos
+                        cnt += 1
                         try:
-                            self.log(f"LLM 分析 {rref.get('name')} 出错: {e}")
-                            self.log(traceback.format_exc())
+                            self.root.after(0, lambda v=(cnt / total_tasks) * 100: self.progress.configure(value=v))
                         except Exception:
                             pass
-                        return {"score": None, "summary": f"LLM error: {e}"}
-
-                max_workers = 4
-                try:
-                    max_workers = max(1, min(10, int(self.llm_threads.get())))
-                except Exception:
-                    max_workers = 4
-
-                future_to_mid = {}
-                results_map = {}
-                with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as ex:
-                    for r in tops:
-                        info = {"name": r['name'], 'mid': r['mid'], 'videos': r.get('total_videos'), 'views': r.get('views'), 'likes': r.get('likes'), 'top_videos': r.get('videos_list')[:3]}
-                        fut = ex.submit(_call_llm_safe, info, r)
-                        future_to_mid[fut] = r['mid']
-                    for fut in concurrent.futures.as_completed(future_to_mid):
-                        mid = future_to_mid[fut]
+                except Exception as e:
+                    self.log(f"处理UP主 {up_mid} 的视频时出错: {e}")
+                    cnt += 1
+                    try:
+                        self.root.after(0, lambda v=(cnt / total_tasks) * 100: self.progress.configure(value=v))
+                    except Exception:
+                        pass
+        
+        # 第三步：根据关键词过滤每个UP主的视频
+        self.log(f"模式2: 开始根据关键词过滤视频...")
+        for up_mid, videos in up_videos_map.items():
+            if self._stop_event.is_set():
+                break
+            # 对每个视频，检查是否匹配任何关键词
+            for video in videos:
+                title = (video.get('title') or '').lower()
+                desc = (video.get('desc') or video.get('description') or '').lower()
+                # 检查视频标题或描述是否包含任何关键词
+                matched_keyword = None
+                for kw in keywords:
+                    kw_lower = kw.lower()
+                    if kw_lower in title or kw_lower in desc:
+                        matched_keyword = kw
+                        break
+                
+                # 如果匹配关键词，添加到收集列表
+                if matched_keyword:
+                    # 设置匹配的关键词
+                    video['keyword'] = matched_keyword
+                    # 日期过滤
+                    pub = video.get('pubdate')
+                    if pub and start_ts and end_ts:
                         try:
-                            out = fut.result()
-                        except Exception as e:
-                            out = {"score": None, "summary": f"LLM error: {e}"}
-                        results_map[mid] = out
+                            if not (start_ts <= int(pub) <= end_ts):
+                                continue
+                        except Exception:
+                            pass
+                    collected.append(video)
+        
+        self.log(f"模式2: 关键词过滤完成，共收集 {len(collected)} 条匹配的视频")
+        
+        self._process_collected_results(collected, start_ts, end_ts)
 
-                # apply results to corresponding entries
-                for r in tops:
-                    out = results_map.get(r['mid']) or {"score": None, "summary": ""}
-                    llm_score = out.get('score') if isinstance(out, dict) else None
-                    try:
-                        llm_score = float(llm_score)
-                    except Exception:
-                        llm_score = None
-                    if llm_score is None:
-                        llm_score = 5.0
-                    llm_score = max(1.0, min(10.0, llm_score))
-                    r['llm_score'] = llm_score
-                    r['llm_summary'] = out.get('summary', '') if isinstance(out, dict) else str(out)
-                    # write LLM output to app log (truncate to avoid flooding)
-                    try:
-                        summary_text = r['llm_summary'] or ''
-                        short = (summary_text[:400] + '...') if len(summary_text) > 400 else summary_text
-                        self.log(f"LLM 分析 - {r.get('name')} ({r.get('mid')}): score={llm_score}, summary={short}")
-                    except Exception:
-                        pass
-                    # also log raw model output if available (truncated)
-                    try:
-                        raw_text = ''
-                        if isinstance(out, dict):
-                            raw_text = out.get('raw') or out.get('_raw') or ''
-                        else:
-                            raw_text = str(out)
-                        if raw_text:
-                            short_raw = (raw_text[:1000] + '...') if len(raw_text) > 1000 else raw_text
-                            self.log(f"LLM 原始输出 - {r.get('name')} ({r.get('mid')}): {short_raw}")
-                    except Exception:
-                        pass
+    def _process_collected_results(self, collected, start_ts, end_ts):
+        """处理收集到的结果，进行聚合、评分和LLM分析"""
+        # aggregate by owner with per-category stats
+        by_owner = {}
+        for it in collected:
+            owner = it.get('owner') or {}
+            mid = owner.get('mid') or owner.get('mid')
+            if not mid:
+                continue
+            entry = by_owner.setdefault(
+                mid,
+                {
+                    "name": owner.get('name') or owner.get('uname') or str(mid),
+                    "mid": mid,
+                    "videos": [],
+                    "views_total": 0,
+                    "likes_total": 0,
+                    "favorites_total": 0,
+                    "desc_len_total": 0,
+                    "by": {
+                        "abyss": {"count": 0, "views": 0, "likes": 0, "favorites": 0, "desc_len": 0, "videos": []},
+                        "battle": {"count": 0, "views": 0, "likes": 0, "favorites": 0, "desc_len": 0, "videos": []},
+                        "other": {"count": 0, "views": 0, "likes": 0, "favorites": 0, "desc_len": 0, "videos": []},
+                    },
+                },
+            )
+            stat = it.get('stat') or {}
+            views = int(stat.get('view', 0) or 0)
+            likes = int(stat.get('like', 0) or stat.get('like') or 0)
+            favorites = int(stat.get('favorite') or stat.get('favorites') or stat.get('favorite_count') or stat.get('collect') or 0)
+            title = (it.get('title') or '')
+            kw = (it.get('keyword') or '')
+            desc_text = (it.get('desc') or it.get('description') or "")
+            desc_len = len(desc_text.strip())
+            cat = 'other'
+            if '深渊' in kw or '深渊' in title:
+                cat = 'abyss'
+            elif '记忆战场' in kw or '记忆战场' in title or '战场' in kw or '战场' in title:
+                cat = 'battle'
+            entry['videos'].append({
+                "bvid": it.get('bvid'),
+                'title': title,
+                'views': views,
+                'likes': likes,
+                'favorites': favorites,
+                'desc_len': desc_len,
+                'pubdate': it.get('pubdate'),
+                'cat': cat,
+            })
+            entry['views_total'] += views
+            entry['likes_total'] += likes
+            entry['favorites_total'] += favorites
+            entry['desc_len_total'] += desc_len
+            entry['by'][cat]['count'] += 1
+            entry['by'][cat]['views'] += views
+            entry['by'][cat]['likes'] += likes
+            entry['by'][cat]['favorites'] += favorites
+            entry['by'][cat]['desc_len'] += desc_len
+            entry['by'][cat]['videos'].append({"bvid": it.get('bvid'), 'title': title, 'views': views, 'likes': likes, 'favorites': favorites, 'desc_len': desc_len, 'pubdate': it.get('pubdate')})
 
-                for r in lst:
-                    base = lst_norm.get(r['mid'], 0.0)
-                    llm_s = r.get('llm_score')
-                    if llm_s is None:
-                        final = base
-                    else:
-                        final = (1.0 - llm_weight) * base + llm_weight * (llm_s)
-                    r['final_score'] = final
-
-            enrich_with_llm_and_combine(overall, overall_norm)
-            enrich_with_llm_and_combine(abyss, abyss_norm)
-            enrich_with_llm_and_combine(battle, battle_norm)
-
-            def sort_by_final(lst):
-                lst.sort(key=lambda x: x.get('final_score', x.get('score', 0)), reverse=True)
-
-            sort_by_final(overall)
-            sort_by_final(abyss)
-            sort_by_final(battle)
-
-            for lst in (overall, abyss, battle):
-                for r in lst:
-                    r['score'] = round(r.get('final_score', r.get('score', 0)), 3)
-
-            self._llm_used_last = bool(llm)
-            self._results_unfiltered = {
-                "总榜": copy.deepcopy(overall),
-                "深渊榜": copy.deepcopy(abyss),
-                "战场榜": copy.deepcopy(battle),
+        # scoring: create three leaderboards
+        overall = []
+        abyss = []
+        battle = []
+        def build_entry(mid, name, stats, videos_subset):
+            return {
+                'mid': mid,
+                'name': name,
+                'total_videos': stats.get('count', 0),
+                'views': stats.get('views', 0),
+                'likes': stats.get('likes', 0),
+                'favorites': stats.get('favorites', 0),
+                'desc_len': stats.get('desc_len', 0),
+                'videos_list': videos_subset or [],
+                'score': 0.0,
             }
-            self._refresh_results_with_blacklist(update_ui=False)
-            self.root.after(0, self._apply_results_to_ui)
-            self.root.after(0, lambda: self.start_btn.config(state=tk.NORMAL))
-            self.root.after(0, lambda: self.export_btn.config(state=tk.NORMAL))
-            self.root.after(0, lambda: self.stop_btn.config(state=tk.DISABLED))
-            self.log(f"采集完成，共 {len(collected)} 条视频，聚合后 {len(by_owner)} 个 UP 主")
+
+        for mid, v in by_owner.items():
+            overall_stats = {
+                'count': len(v['videos']),
+                'views': v['views_total'],
+                'likes': v['likes_total'],
+                'favorites': v.get('favorites_total', 0),
+                'desc_len': v.get('desc_len_total', 0),
+            }
+            abyss_stats = v['by']['abyss']
+            battle_stats = v['by']['battle']
+
+            overall.append(build_entry(mid, v['name'], overall_stats, v['videos']))
+            abyss.append(build_entry(mid, v['name'], abyss_stats, abyss_stats.get('videos') or []))
+            battle.append(build_entry(mid, v['name'], battle_stats, battle_stats.get('videos') or []))
+
+        overall.sort(key=lambda x: x['score'], reverse=True)
+        abyss.sort(key=lambda x: x['score'], reverse=True)
+        battle.sort(key=lambda x: x['score'], reverse=True)
+
+        self._prepare_weighted_metrics(overall)
+        self._prepare_weighted_metrics(abyss)
+        self._prepare_weighted_metrics(battle)
+
+        # optional LLM analysis for top N (use configured LLM settings)
+        provider = self.provider.get()
+        api_key = self.api_key.get().strip()
+        api_url = self.api_url.get().strip() or None
+        llm = None
+        if self.use_llm.get() and provider != 'none':
+            llm = LLMClient(provider=provider, endpoint=api_url, api_key=api_key, model=self.llm_model.get())
+
+        overall_norm = self._normalize_scores(overall)
+        abyss_norm = self._normalize_scores(abyss)
+        battle_norm = self._normalize_scores(battle)
+
+        # combine with LLM if available
+        llm_weight = max(0.0, min(1.0, float(self.llm_weight.get())))
+        def enrich_with_llm_and_combine(lst, lst_norm):
+            for r in lst[:50]:
+                r['llm_score'] = None
+                r['llm_summary'] = ''
+            if not llm:
+                self._apply_local_summaries(lst)
+                return
+
+            # perform LLM analysis in parallel for top N (configurable via self.llm_threads)
+            top_n = min(50, len(lst))
+            tops = lst[:top_n]
+
+            def _call_llm_safe(uinfo, rref):
+                try:
+                    return llm.analyze_uploader(uinfo, top_videos=rref.get('videos_list')[:3])
+                except Exception as e:
+                    try:
+                        self.log(f"LLM 分析 {rref.get('name')} 出错: {e}")
+                        self.log(traceback.format_exc())
+                    except Exception:
+                        pass
+                    return {"score": None, "summary": f"LLM error: {e}"}
+
+            max_workers = 4
+            try:
+                max_workers = max(1, min(10, int(self.llm_threads.get())))
+            except Exception:
+                max_workers = 4
+
+            future_to_mid = {}
+            results_map = {}
+            with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as ex:
+                for r in tops:
+                    info = {"name": r['name'], 'mid': r['mid'], 'videos': r.get('total_videos'), 'views': r.get('views'), 'likes': r.get('likes'), 'top_videos': r.get('videos_list')[:3]}
+                    fut = ex.submit(_call_llm_safe, info, r)
+                    future_to_mid[fut] = r['mid']
+                for fut in concurrent.futures.as_completed(future_to_mid):
+                    mid = future_to_mid[fut]
+                    try:
+                        out = fut.result()
+                    except Exception as e:
+                        out = {"score": None, "summary": f"LLM error: {e}"}
+                    results_map[mid] = out
+
+            # apply results to corresponding entries
+            for r in tops:
+                out = results_map.get(r['mid']) or {"score": None, "summary": ""}
+                llm_score = out.get('score') if isinstance(out, dict) else None
+                try:
+                    llm_score = float(llm_score)
+                except Exception:
+                    llm_score = None
+                if llm_score is None:
+                    llm_score = 5.0
+                llm_score = max(1.0, min(10.0, llm_score))
+                r['llm_score'] = llm_score
+                r['llm_summary'] = out.get('summary', '') if isinstance(out, dict) else str(out)
+                # write LLM output to app log (truncate to avoid flooding)
+                try:
+                    summary_text = r['llm_summary'] or ''
+                    short = (summary_text[:400] + '...') if len(summary_text) > 400 else summary_text
+                    self.log(f"LLM 分析 - {r.get('name')} ({r.get('mid')}): score={llm_score}, summary={short}")
+                except Exception:
+                    pass
+                # also log raw model output if available (truncated)
+                try:
+                    raw_text = ''
+                    if isinstance(out, dict):
+                        raw_text = out.get('raw') or out.get('_raw') or ''
+                    else:
+                        raw_text = str(out)
+                    if raw_text:
+                        short_raw = (raw_text[:1000] + '...') if len(raw_text) > 1000 else raw_text
+                        self.log(f"LLM 原始输出 - {r.get('name')} ({r.get('mid')}): {short_raw}")
+                except Exception:
+                    pass
+
+            for r in lst:
+                base = lst_norm.get(r['mid'], 0.0)
+                llm_s = r.get('llm_score')
+                if llm_s is None:
+                    final = base
+                else:
+                    final = (1.0 - llm_weight) * base + llm_weight * (llm_s)
+                r['final_score'] = final
+
+        enrich_with_llm_and_combine(overall, overall_norm)
+        enrich_with_llm_and_combine(abyss, abyss_norm)
+        enrich_with_llm_and_combine(battle, battle_norm)
+
+        def sort_by_final(lst):
+            lst.sort(key=lambda x: x.get('final_score', x.get('score', 0)), reverse=True)
+
+        sort_by_final(overall)
+        sort_by_final(abyss)
+        sort_by_final(battle)
+
+        for lst in (overall, abyss, battle):
+            for r in lst:
+                r['score'] = round(r.get('final_score', r.get('score', 0)), 3)
+
+        self._llm_used_last = bool(llm)
+        self._results_unfiltered = {
+            "总榜": copy.deepcopy(overall),
+            "深渊榜": copy.deepcopy(abyss),
+            "战场榜": copy.deepcopy(battle),
+        }
+        self._refresh_results_with_blacklist(update_ui=False)
+        self.root.after(0, self._apply_results_to_ui)
+        self.root.after(0, lambda: self.start_btn.config(state=tk.NORMAL))
+        self.root.after(0, lambda: self.export_btn.config(state=tk.NORMAL))
+        self.root.after(0, lambda: self.stop_btn.config(state=tk.DISABLED))
+        self.log(f"采集完成，共 {len(collected)} 条视频，聚合后 {len(by_owner)} 个 UP 主")
 
     
 
